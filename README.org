@@ -1,15 +1,19 @@
 This project is incomplete. It doesn't do the SVG drawing yet.
 
 This is a tool for annotating circuit boards in Inkscape. To use it you have to:
+
 - write a yaml file with board/chip info
 - create an inkscape drawing with a photo
 - put a rectangle on top of every chip
-- run the extension and match chips
-- TODO
+- select the rectangles you want to match
+- run the extension
+- select your yaml file, hit apply
+- match chips to images, hit apply
+- nothing will happen, this project is unfinished
 
 * Install 
 
-Put the board_annotate files in =~/.config/inkscape/extensions=, but rename =board_annotate.glade= to =board_annotate.ui=.
+For now, put the board_annotate files in =~/.config/inkscape/extensions=, but rename =board_annotate.glade= to =board_annotate.ui=.
 
 It should appear in Inkscape's =Extensions -> Render= menu as 'Board Annotate'.
 
@@ -20,7 +24,7 @@ It should appear in Inkscape's =Extensions -> Render= menu as 'Board Annotate'.
 - throw the board and chips images into a folder
 - edit photos (adjust alignment, crop, rotate, adjust contrast)
     + about 10 minutes for 16 chips using gphoto
-- create a yaml config like
+- create a yaml config like:
 
 #+BEGIN_SRC yaml
 orientation: landscape
@@ -34,6 +38,7 @@ chips:
     description: About Chip 2
 #+END_SRC
 
+Landscape is where annotations go above and below. In portrait mode, they go on the left and right.
 
 * Other considerations
 - multiple chips of same type, may just have to manually edit in a second box and line
@@ -53,18 +58,18 @@ chips:
 
 Given the constraints, here's how I could imagine it working:
 
-- [x] put the image into inkscape
-- [x] draw a bunch of rectangles over all the chips
-- [x] select them all
-- [x] run the extension
-- [x] the extension grabs the yaml file
-- [x] render the image without the selection rectangles
-- [x] the extension displays a list of images with dropdown chip lists
-- [x] the user selects the matching chip for each
-- some math decides best above-below or left-right position
-- draw all the things
+- [X] put the image into inkscape
+- [X] draw a bunch of rectangles over all the chips
+- [X] select them all
+- [X] run the extension
+- [X] the extension grabs the yaml file
+- [X] render the image without the selection rectangles
+- [X] the extension displays a list of images with dropdown chip lists
+- [X] the user selects the matching chip for each
+- [] some math decides best above-below or left-right position
+- [] draw all the things
 
-* TODO
+* TODO Things to be done, probably
 - parse the yaml more
 - can the combo box display everything? not without a custom cell renderer, or moving away from TreeView
 

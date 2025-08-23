@@ -67,3 +67,7 @@ Given the constraints, here's how I could imagine it working:
 * TODO
 - parse the yaml more
 - can the combo box display everything? not without a custom cell renderer, or moving away from TreeView
+
+* Screenshot
+
+[[screenshot.png]]

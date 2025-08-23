@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
+  <name>Board Annotate</name>
+  <id>org.epakai.extension.board_annotate</id>
+
+  <param name="tab" type="notebook">
+      <page name="board_description" gui-text="Board Description">
+          <param type="path" name="yaml-file" mode="file"
+              gui-text="YAML file"
+              gui-description="YAML file with board info" />
+      </page>
+
+      <page name="About" gui-text="About">
+          <label>
+              This extension annotates a circuit board image
+              (or any image) based on the contents of a YAML file. See 
+          </label>
+          <label appearance="url">https://github.com/epakai/board_annotate</label>
+          <label>
+              for documentation and examples.
+          </label>
+          <spacer size="10" />
+          <label>
+              Author: Joshua Honeycutt
+          </label>
+      </page>
+  </param>
+
+  <effect needs-live-preview="false">
+    <object-type>all</object-type>
+      <effects-menu>
+        <submenu name="Render"/>
+      </effects-menu>
+  </effect>
+
+  <script>
+      <command location="inx" interpreter="python">board_annotate.py</command>
+  </script>
+</inkscape-extension>

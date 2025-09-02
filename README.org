@@ -1,77 +1,168 @@
-This project is incomplete. It doesn't do the SVG drawing yet.
+This is a tool for annotating circuit boards in Inkscape.
 
-This is a tool for annotating circuit boards in Inkscape. To use it you have to:
+It takes:
+    - a circuit board photo
+    - chip photos
+    - a yaml config with chip information and configuration options
+    - an appropriate Inkscape document
+Then you play a quick matching game, and it produces little colored annotations around the board image. See [[Screenshot]]
 
-- write a yaml file with board/chip info
-- create an inkscape drawing with a photo
-- put a rectangle on top of every chip
-- select the rectangles you want to match
-- run the extension
-- select your yaml file, hit apply
-- match chips to images, hit apply
-- nothing will happen, this project is unfinished
+All images are embedded in the SVG (for now).
 
 * Install 
 
-For now, put the board_annotate files in =~/.config/inkscape/extensions=, but rename =board_annotate.glade= to =board_annotate.ui=.
+For now, put the 'board_annotate' py, ui, and inx files into =~/.config/inkscape/extensions=.
 
 It should appear in Inkscape's =Extensions -> Render= menu as 'Board Annotate'.
 
 * Steps
 
-** Manual prep
-
+** Preparation
 - throw the board and chips images into a folder
 - edit photos (adjust alignment, crop, rotate, adjust contrast)
     + about 10 minutes for 16 chips using gphoto
 - create a yaml config like:
 
 #+BEGIN_SRC yaml
-orientation: landscape
+gutter: horizontal
 board_photo: board.jpg
 chips:
   - name: Chip 1
     chip_photo: chip1.jpg
     description: About Chip 1
   - name: Chip 2
-    chip photo: chip2.jpg
+    chip_photo: chip2.jpg
     description: About Chip 2
 #+END_SRC
 
-Landscape is where annotations go above and below. In portrait mode, they go on the left and right.
+For empty fields, use "". =chip_photo= and =description= can be empty
+
+=chip_photo= can be an absolute path, otherwise it is relative to the yaml file.
+
+=gutter= sets where the annotations are drawn. It can be =horizontal= (drawn above and below, or =vertical= (drawn on the left and right).
+
+** In Inkscape
+- create a new image
+- put the board photo in it
+- probably resize it to use one full dimension of the page
+- leave gutter space above​/below or on the left​/right
+    + gutters don't have to be even
+- draw a rectangle on top of every chip
+- select the rectangles
+- run the extension
+
+** The extension
+- select your yaml file with the file picker, hit apply
+- match chips to images (click on 'Select a chip' twice to open the selection)
+- hit apply once all chips have been matched
+- close the error window
+- images will be embedded, and annotations drawn
+
+See [[file:usage.org][usage]]
+
+* Other config options
+** image_ratio
+Annotations have a ratio between image and text. The default is 0.6 (image). It can be set like:
+
+#+BEGIN_SRC yaml
+image_ratio: 0.4
+#+END_SRC
+
+Bigger image ratios:
+    - increase the gutter fill (less empty space)
+    - make the text area wider and shorter
+
+Smaller image ratios:
+    - reduce fill (useful if the gutters are over full)
+    - make the text area narrower, and taller
+
+** palette and colors
+
+There are a few built-in color palettes. They are specified with 'palette' key, and can be:
+
+=default, light, dark, medium, all, random=
+
+Palette can also be set to =custom=. Custom requires a second key, 'colors', for the list of colors. These can be color names, HTML color codes (must be quoted), integers, or hex values.
+
+Here's an example:
+
+#+BEGIN_SRC yaml
+palette: custom
+colors:
+  - '#263C8B'
+  - 0x4e74A6FF
+  - beige
+  - goldenrod
+  - "#2E231F"
+#+END_SRC
+
+* TODO Things to be done, probably
+** GUI stuff
+- can the combo box display everything? not without a custom cell renderer, or moving away from TreeView
+- This UI ended up being pretty bad, but it does the job
+    + Currently you scroll a lot, and have to click twice to open the selection drop down.
+    + After using it, I think:
+        * The UI should be a small match list area, and a large matching area.
+        * The match list area indicates match status, and let the user easily access any match
+        * The match area displays one photo and selection list.
+        * The user selects, then has keyboard+gui controls to move forward, and backward.
+
+** Testing and edge cases
+- test with bad file paths
+- test with empty name, description, photo etc.
+- what happens if the gutter fills up?
+- what happens if both gutters fills up?
+- what happens with rects in the gutter?
+    + overlapping the gutter?
+    + outside the page?
+    + straddling the page border?
+- Lots of missing input verification when accessing the yaml config
+
+** Bugs
+- Undo doesn't restore the selection. I think it was working previously.
+- Connectors can pass through the gutter
+    + I could fill empty gutter space with rects that set 'connector-avoid'
+
+** Enhancments
+- Gutter filling is overly simple
+    + Currently we fill left to right, and try to keep gutters evenly filled
+    + My better idea:
+        * Pick a dividing line that makes for roughly equal gutter fill
+        * Position every annotation directly above its first matching chip
+        * Work from the center and bump overlapping annotations outward
+        * Drawing becomes a separate step
+- Could probably determine gutter orientation automatically
+- More user appearance settings:
+    + fonts, sizes, text color, backgrounds
+    + box/path stroke width
+- Allow non-rect shapes (for annotating areas and functional blocks)
+- Connectors could be optional (just outline the chip and annotation)
+- Write back matches to the yaml file? 
+    + would make it much easier to iterate if the matchset hasn't changed
+    + would need a checkbox to save matches
+    + an option somewhere to erase matches
+    + extra checks to ensure matching rectangles still exist
+- Some way to indicate the annotated chip is on the reverse side of the board (for when it's not worth annotating both sides)
+- Resize embedded images to match DPI. 
+    + Could be worth automating to reduce output SVG size.
+    + Edit > Make a Bitmap Copy
+    + This makes a copy with the DPI based on an Inkscape preference
+    + Then grab the original and delete it
+- A layout more suited for text only (no zoomed chip photos)
+- Avoid colors close to the circuit board color
+    + probably average the gdkpixbuf colors, and skip colors close to it
+- should probably inset the image inside the border
+- maybe allow groups in the selection but filter them for processing
+    + does selecting a group automatically include its children?
+- non-embedded photos
 
 * Other considerations
-- multiple chips of same type, may just have to manually edit in a second box and line
-- use connectors for paths (anchors the path end node to the object)
-    + I played with this in the GUI for a bit, and it was wonky
-    + Maybe there's a nicer way in programming to get consistent connections
-    + See [[https://inkscape.org/forums/questions/how-to-anchor-points-from-one-shape-to-another/]]
-- sometimes you don't have a chip photo but still want to annotate, or maybe no zoomed images because you know how to take photos
-- what if a rectangle is rotated? pick closest midpoint?
 - genericize the names, this can probably be used for non-circuit board things
     + Board annotate ->
     + board_photo -> 
     + chip_photo -> 
-    + chip_ functions
-
-* Extensions are hard
-
-Given the constraints, here's how I could imagine it working:
-
-- [X] put the image into inkscape
-- [X] draw a bunch of rectangles over all the chips
-- [X] select them all
-- [X] run the extension
-- [X] the extension grabs the yaml file
-- [X] render the image without the selection rectangles
-- [X] the extension displays a list of images with dropdown chip lists
-- [X] the user selects the matching chip for each
-- [] some math decides best above-below or left-right position
-- [] draw all the things
-
-* TODO Things to be done, probably
-- parse the yaml more
-- can the combo box display everything? not without a custom cell renderer, or moving away from TreeView
+    + chip
+    + board
 
 * Screenshot
 

@@ -1,0 +1,28 @@
+* TODO Walkthrough with screenshots
+TODO
+
+* TODO YAML keys and values
+TODO
+
+* Editing afterwards
+
+** Moving annotations in the same gutter
+Annotations can be selected by:
+- dragging a box around them with the selection tool (cursor icon).
+- clicking on the named layer matching the annotation
+
+Then, holding =Ctrl= (restrict to horizontal/vertical movement) while clicking and dragging the selection will move it within the gutter area. It may be useful to enable snapping (toggle with =%=).
+
+** Moving annotations to the other gutter
+Movement is basically the same as above, but the text, and images won't match other annotations.
+
+Rearranging them is tricky because the text objects rely on an invisible shaping rectangle. You can select them easily from the =Layer and Objects= panel, but they are still hard to move. I recommend changing =View > Display Mode= to =Outline Overlay= or =Outline=. Then you can more easily move them by grabbing the outlines.
+
+Again using =Ctrl= to move in one axis, and enabling snapping (toggle with =%=) can help with positioning.
+
+** Changing annotation colors
+All the colored items in an annotation are only set on the stroke attribute. To change it all at once, select the connector, surround, and your original rectangle.
+    
+    If selecting in the drawing area, use =Shift= to select multiple items. If selecting in the =Layers and Objects= panel, use =Ctrl=.
+
+Finally, =Shift + Click= a new color to set the stroke.

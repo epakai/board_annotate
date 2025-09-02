@@ -8,7 +8,9 @@
       <column type="gchararray"/>
       <!-- column-name chip_description -->
       <column type="gchararray"/>
-      <!-- column-name chip_photo -->
+      <!-- column-name chip_image_path -->
+      <column type="gchararray"/>
+      <!-- column-name chip_image -->
       <column type="GdkPixbuf"/>
     </columns>
   </object>

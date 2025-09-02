@@ -590,11 +590,11 @@ class AnnotateColors:
             case 'all':
                 self.iterator = self.color_gen(self.default + self.dark +
                                                self.light + self.medium)
-            case 'random':
+            case 'all_random':
                 full_list = self.default + self.dark + self.light + self.medium
                 random.shuffle(full_list)
                 self.iterator = self.color_gen(full_list)
-            case 'custom':
+            case 'custom' | 'custom_random':
                 if 'colors' in yaml_config:
                     colors = yaml_config['colors']
                     for color in colors:
@@ -605,6 +605,8 @@ class AnnotateColors:
                                 f"Invalid color in 'custom' palette: {color}")
                             raise inkex.utils.AbortExtension
 
+                    if palette == 'custom_random':
+                        random.shuffle(colors)
                     self.iterator = self.color_gen(colors)
                 else:
                     inkex.utils.errormsg(

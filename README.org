@@ -5,7 +5,7 @@ It takes:
     - chip photos
     - a yaml config with chip information and configuration options
     - an appropriate Inkscape document
-Then you play a quick matching game, and it produces little colored annotations around the board image. See [[*Screenshot]].
+Then you play a quick matching game, and it produces little colored annotations around the board image. See [[screenshot.png]].
 
 All images are embedded in the SVG (for now).
 

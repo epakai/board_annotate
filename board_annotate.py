@@ -1,4 +1,5 @@
 #! /usr/bin/env python
+"""Board Annotate Inkscape extension"""
 
 # Board Annotate - inkscape extension to annotate circuit boards
 # Copyright (C) 2025 Joshua Honeycutt
@@ -19,23 +20,91 @@
 
 import os
 import copy
-import yaml
 import base64
 import math
-import inkex
 import random
-from inkex.gui import GtkApp, Window
-from gi.repository import Gtk, GdkPixbuf, Gio, GLib
 from enum import Enum
+from typing import (Generator, Self, List, Tuple, Optional, Dict, Any)
+
+import argparse
+import yaml
+import inkex
+import inkex.gui
+from gi.repository import Gtk, GdkPixbuf, Gio, GLib
+
 
 # Globals
-inkscape_svg = None
-yaml_file = None
-yaml_config = None
+INKSCAPE_SVG: inkex.SvgDocumentElement = None
+YAML_FILE: str = ''
+YAML_CONFIG = yaml.load("", Loader=yaml.SafeLoader)
+
+
+class BoardAnnotateExtension(inkex.EffectExtension):
+    """Board Annotate Inkscape extension"""
+
+    def add_arguments(self, pars: argparse.ArgumentParser) -> None:
+        """Handle arguments from board_annotate.inx dialog"""
+        pars.add_argument('--yaml-file', type=str,
+                          help='Board YAML configuration')
+        pars.add_argument('--tab', dest='tab',
+                          help='The selected UI tab when Apply was pressed')
+
+    def effect(self) -> None:
+        """Handle info from board_annotate.inx dialog,
+        and start GUI selection"""
+        global YAML_FILE
+        global YAML_CONFIG
+        global INKSCAPE_SVG
+
+        YAML_FILE = self.options.yaml_file
+        INKSCAPE_SVG = self.svg
+
+        if (YAML_FILE is not None and not os.path.isdir(YAML_FILE)):
+            # see https://gitlab.com/inkscape/inkscape/-/issues/2822
+            # for why isdir check is used
+            with open(YAML_FILE, 'r', encoding='utf-8') as file:
+                YAML_CONFIG = yaml.safe_load(file)
+
+        # validate color settings in the yaml config
+        # (so user gets warned before trying to match chips)
+        AnnotateColors.validate_colors(YAML_CONFIG)
+        try:
+            sorted_selection = self.sort_check_selection()
+        except ValueError as error:
+            inkex.utils.errormsg(error)
+            raise inkex.utils.AbortExtension
+        # TODO probably could do some more early checks
+
+        SelectionApp(start_loop=True,
+                     selection=sorted_selection)
+
+    def sort_check_selection(self) -> inkex.elements._selected.ElementList:
+        """Sort selection rectangles left to right or top to bottom
+        also checks for invalid selections, and a valid gutter setting"""
+        for item in INKSCAPE_SVG.selection:
+            if str(item) != 'rect':
+                item_id = item.get_id()
+                inkex.utils.errormsg(
+                    f"Invalid items selected\n"
+                    f"Found '{str(item)}':'{item_id}' in selection\n"
+                    f"Board annotate only works on rectangles")
+                raise inkex.utils.AbortExtension
+        if YAML_CONFIG['gutter'] == "horizontal":  # left to right
+            return sorted(INKSCAPE_SVG.selection,
+                          key=lambda e: float(e.bounding_box().center_x))
+        if YAML_CONFIG['gutter'] == "vertical":  # top to bottom
+            return sorted(INKSCAPE_SVG.selection,
+                          key=lambda e: float(e.bounding_box().center_y))
+
+        raise ValueError("YAML config gutter is not "
+                         "'horizontal' or 'vertical' ")
 
 
 class ChipSelection(Gtk.CellRendererCombo):
-    def __init__(self, model, selection_items, apply_button, info_label):
+    """ComboBox for selecting chip names"""
+    def __init__(self, model: Gtk.TreeModel, selection_items: Gtk.ListStore,
+                 apply_button: Gtk.Button, info_label: Gtk.Label) -> None:
+        """configure combobox and connect edit signal"""
         super().__init__()
         self.set_property('editable', True)
         self.set_property('model', model)
@@ -44,8 +113,12 @@ class ChipSelection(Gtk.CellRendererCombo):
         self.connect('edited', self.on_combo_changed,
                      selection_items, apply_button, info_label)
 
-    def on_combo_changed(self, widget, path, text, selection_items,
-                         apply_button, info_label):
+    def on_combo_changed(self, widget: Gtk.Widget, path: str, text: str,
+                         selection_items: Gtk.ListStore,
+                         apply_button: Gtk.Button,
+                         info_label: Gtk.Label) -> None:
+        """Enable apply button if all combos are selected.
+        Or update info label to reflect remaining unselected count"""
         selection_items[path][2] = text
         item_iter = selection_items.get_iter_first()
         item_remaining_count = selection_items.iter_n_children()
@@ -67,19 +140,22 @@ class ChipSelection(Gtk.CellRendererCombo):
             info_label.show()
 
 
-class SelectionWindow(Window):
+class SelectionWindow(inkex.gui.Window):
+    """Window with Treeview for matching chips to the board image rectangles"""
+    primary = True
     name = "board_annotate"
 
-    def __init__(self, widget, *args, **kwargs):
+    def __init__(self, widget: Gtk.Widget, *args: List[str],
+                 **kwargs: List[List[str]]):
         super().__init__(widget, *args, **kwargs)
 
         # Chips defined in user provide yaml
         chip_items = self.widget('chip_items')
-        for chip in yaml_config['chips']:
+        for chip in YAML_CONFIG['chips']:
             chip_image_path = chip['chip_photo']
-            if not os.path.isabs(chip_image_path) and chip_image_path:
+            if not os.path.isabs(chip_image_path) and chip['chip_photo']:
                 chip_image_path = os.path.join(
-                    os.path.dirname(yaml_file), chip['chip_photo'])
+                    os.path.dirname(YAML_FILE), chip['chip_photo'])
             # NOTE chip_items last column is GdkPixbuf for the chip image
             #      maybe a better UI would load the image and display it
             #      Right now it is only loaded to get the image dimensions
@@ -113,48 +189,57 @@ class SelectionWindow(Window):
         self.window.show_all()
         self.window.connect("destroy", Gtk.main_quit)
 
-    def on_close_clicked(self, button):
+    def on_close_clicked(self, button: Gtk.Button) -> None:
+        """Exit the extension"""
         Gtk.main_quit()
 
-    def on_apply_clicked(self, button, selection_items, chip_items):
-        AnnotateBoard(selection_items, chip_items)
+    def on_apply_clicked(self, button: Gtk.Button,
+                         selection_items: Gtk.ListStore,
+                         chip_items: Gtk.ListStore) -> None:
+        """Modify the svg and exit the extension"""
+        annotate_board(selection_items, chip_items)
         Gtk.main_quit()
 
 
-class SelectionApp(GtkApp):
+class SelectionApp(inkex.gui.GtkApp):
+    """inkex GtkApp"""
     glade_dir = os.path.join(os.path.dirname(__file__))
     app_name = "inkscape_board_annotate"
     windows = [SelectionWindow]
 
 
 class Gutter:
+    """Gutter for positioning annotations"""
     index = 0
     offset = 0.0
 
     class Position(Enum):
+        """Possible positions for a gutter"""
         ABOVE = 1
         BELOW = 2
         LEFT = 3
         RIGHT = 4
 
-    def __init__(self, position, board_image):
+    def __init__(self, position: Position,
+                 board_image: inkex.Image) -> None:
+        """Set up the gutter in position near the board_image"""
         self.position = position
-        self.image_ratio = (yaml_config['image_ratio']
-                            if 'image_ratio' in yaml_config
+        self.image_ratio = (YAML_CONFIG['image_ratio']
+                            if 'image_ratio' in YAML_CONFIG
                             else 0.6)
         match position:
             case self.Position.ABOVE:
                 self.gutter_size = board_image.top
             case self.Position.BELOW:
-                self.gutter_size = (inkscape_svg.viewbox_height -
+                self.gutter_size = (INKSCAPE_SVG.viewbox_height -
                                     board_image.bottom)
             case self.Position.LEFT:
                 self.gutter_size = board_image.left
             case self.Position.RIGHT:
-                self.gutter_size = (inkscape_svg.viewbox_width -
+                self.gutter_size = (INKSCAPE_SVG.viewbox_width -
                                     board_image.right)
 
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         self.image_display_size = (self.gutter_size * self.image_ratio -
                                    stroke_width)
 
@@ -168,7 +253,7 @@ class Gutter:
             case self.Position.RIGHT:
                 self.main_image_edge = board_image.right
 
-    def get_approximate_corners(self):
+    def get_approximate_corners(self) -> Tuple[List[float], List[float]]:
         """
         return a tuple of the 2 corners closest to the main image edge
         ([x,y],[x,y])
@@ -185,14 +270,17 @@ class Gutter:
                         [self.main_image_edge,
                          self.offset + self.image_display_size])
 
-    def get_position_size(self, width, height):
+    def get_position_size(self, width: int, height: int
+                          ) -> Tuple[float, float, float, float]:
+        """return tuple of x, y, width, height
+        where the annotation surround should be placed"""
         # Work around annotations without images
         if width == 0:
             width = self.image_display_size
         if height == 0:
             height = self.image_display_size
 
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
             case self.Position.ABOVE:
                 return (
@@ -205,7 +293,7 @@ class Gutter:
                     self.offset + (0.5 * stroke_width),
                     self.main_image_edge + (0.5 * stroke_width),
                     (self.image_display_size * (width/height) + stroke_width),
-                    (inkscape_svg.viewbox_height -
+                    (INKSCAPE_SVG.viewbox_height -
                      self.main_image_edge - stroke_width))
             case self.Position.LEFT:
                 return (
@@ -217,14 +305,15 @@ class Gutter:
                 return (
                     self.main_image_edge + (0.5 * stroke_width),
                     self.offset + (0.5 * stroke_width),
-                    (inkscape_svg.viewbox_width -
+                    (INKSCAPE_SVG.viewbox_width -
                      self.main_image_edge - stroke_width),
                     (self.image_display_size * (height/width) + stroke_width))
 
-    def get_image_position_size(self, width, height):
-        ''' return tuple of x, y, width, height
-        where the image should be placed'''
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+    def get_image_position_size(self, width: int, height: int
+                                ) -> Tuple[float, float, float, float]:
+        """return tuple of x, y, width, height
+        where the image should be placed"""
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
             case self.Position.ABOVE:
                 return (
@@ -253,9 +342,10 @@ class Gutter:
                     self.image_display_size,
                     self.image_display_size * (height / width))
 
-    def increment(self, width, height):
+    def increment(self, width: float, height: float) -> None:
+        """set up for placing the next annotation"""
         self.index += 1
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
             case self.Position.ABOVE | self.Position.BELOW:
                 self.offset += width + stroke_width
@@ -264,15 +354,20 @@ class Gutter:
 
 
 class Annotation(inkex.Layer):
-    ''' Annotation as an inkscape layer '''
-    def __init__(self, rectangle, name, description, image_path, gdkpixbuf,
-                 color):
+    """Annotation as an inkscape layer"""
+    def __init__(self, rectangle: inkex.Rectangle, name: str, description: str,
+                 image_path: str, gdkpixbuf: GdkPixbuf.Pixbuf,
+                 color: str) -> None:
         self.rectangle = rectangle
         self.name = name
         self.description = description
         self.image_path = image_path
         self.gdkpixbuf = gdkpixbuf
         self.color = inkex.Color(color)
+
+        self.gutter: Optional[Gutter] = None  # set in draw
+        self.svg_image: inkex.Image = None  # set in draw_image
+        self.surround: inkex.Rectangle = None  # set in draw_surround
 
         if self.gdkpixbuf is not None:
             self.image_width = gdkpixbuf.get_width()
@@ -285,46 +380,52 @@ class Annotation(inkex.Layer):
         self.set("inkscape:label", self.name)
         self.set("inkscape:highlight-color", self.color)
 
-    def draw_existing(self, duplicate):
+    def draw_existing(self, duplicate: Self) -> None:
+        """Connect a chip rectangle to an existing annotation"""
         self.color = duplicate.color
         self.set("inkscape:label", self.name)
         self.set("inkscape:highlight-color", self.color)
 
-        self.draw_connector(duplicate.gutter, duplicate)
-        self.update_rectangle_style(duplicate)
+        self.draw_connector(duplicate)
+        self.update_rectangle_style()
         # gutter remains in the same state, no increment
 
-    def draw(self, gutter):
+    def draw(self, gutter: Gutter) -> None:
+        """Draw the annotation"""
         # save gutter in case a duplicate needs it
         self.gutter = gutter
 
-        inkscape_svg.add(self)  # Add the Annotation layer
+        INKSCAPE_SVG.add(self)  # Add the Annotation layer
 
-        self.draw_image(gutter)
-        self.draw_surround(gutter)
-        self.draw_text(gutter)
-        self.draw_connector(gutter)
+        self.draw_image()
+        self.draw_surround()
+        self.draw_text()
+        self.draw_connector()
         self.update_rectangle_style()
 
         # Increment the gutter after everything is drawn
-        bb = self.surround.bounding_box()
-        gutter.increment(bb.width, bb.height)
+        surround_bb = self.surround.bounding_box()
+        gutter.increment(surround_bb.width, surround_bb.height)
 
-    def draw_image(self, gutter):
+    def draw_image(self) -> None:
+        """embed and place the annotation image in the original svg"""
+        assert self.gutter is not None
         if self.image_path and self.gdkpixbuf:
-            position_size = gutter.get_image_position_size(self.image_width,
-                                                           self.image_height)
+            position_size = self.gutter.get_image_position_size(
+                self.image_width, self.image_height)
             # TODO inkscape 1.5 adds inkex.Image
-            #      After that you can remove BA_Image and get_image_type
-            self.svg_image = BA_Image.new(*position_size)
+            # After that you can remove BoardAnnotateImage and get_image_type
+            self.svg_image = BoardAnnotateImage.new(*position_size)
             self.svg_image.embed_image(self.image_path)
             self.add(self.svg_image)
             self.svg_image.label = "chip image"
 
-    def draw_surround(self, gutter):
-        position_size = gutter.get_position_size(self.image_width,
-                                                 self.image_height)
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+    def draw_surround(self) -> None:
+        """draw the annotation surrounding rectangle"""
+        assert self.gutter is not None
+        position_size = self.gutter.get_position_size(
+            self.image_width, self.image_height)
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         self.surround = inkex.Rectangle.new(*position_size)
         self.surround.style['stroke-width'] = stroke_width
         self.surround.style.set_color(self.color, 'stroke')
@@ -335,14 +436,17 @@ class Annotation(inkex.Layer):
         self.add(self.surround)
         self.surround.label = "surround"
 
-    def draw_text(self, gutter):
+    def draw_text(self) -> None:
+        """Place invisible boxes, and shape the text inside them.
+        One for title, and one for description."""
         # TODO try to fit title_box to the title, then give rest to desc_box
         # TODO better fonts
         # TODO better way to set font size based on box dimension
+        assert self.gutter is not None
         surround_bb = self.surround.bounding_box()
         title_box = None
-        text_ratio = 1 - gutter.image_ratio
-        stroke_width = inkscape_svg.viewport_to_unit("1mm")
+        text_ratio = 1 - self.gutter.image_ratio
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         half_stroke_width = 0.5 * stroke_width
         above_half_height = 0.5 * (self.svg_image.top -
                                    (surround_bb.top +
@@ -351,102 +455,96 @@ class Annotation(inkex.Layer):
                                     half_stroke_width) -
                                    self.svg_image.bottom)
         vertical_half_height = 0.5 * (surround_bb.height - stroke_width)
-        match gutter.position:
-            case gutter.Position.ABOVE:
-                title_box_xywh = (
+
+        title_box = None
+        match self.gutter.position:
+            case Gutter.Position.ABOVE:
+                title_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     surround_bb.top + half_stroke_width,
                     surround_bb.width - stroke_width,
                     above_half_height)
-            case gutter.Position.BELOW:
-                title_box_xywh = (
+            case Gutter.Position.BELOW:
+                title_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     self.svg_image.bottom,
                     surround_bb.width - stroke_width,
                     below_half_height)
-            case gutter.Position.LEFT:
-                title_box_xywh = (
+            case Gutter.Position.LEFT:
+                title_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     surround_bb.top + half_stroke_width,
                     surround_bb.width * text_ratio - half_stroke_width,
                     vertical_half_height)
-            case gutter.Position.RIGHT:
-                title_box_xywh = (
+            case Gutter.Position.RIGHT:
+                title_box = inkex.Rectangle.new(
                     self.svg_image.right,
                     surround_bb.top + half_stroke_width,
                     surround_bb.width * text_ratio - half_stroke_width,
                     vertical_half_height)
 
-        # slightly inset the title box
-        title_box = inkex.Rectangle.new(*title_box_xywh)
         title_box.style.set_color(inkex.Color('none'), 'stroke')
         title_box.style.set_color(inkex.Color('none'), 'fill')
 
         title = inkex.TextElement()
-        title_text = inkex.Tspan()
-        title.append(title_text)
-        title_text.text = self.name
-        title.style['font-size'] = inkscape_svg.viewport_to_unit("10pt")
+        title.text = self.name
+        title.style['font-size'] = INKSCAPE_SVG.viewport_to_unit("10pt")
         title.style['text-anchor'] = "middle"
-        self.add(title_box)
-        title_box.label = "title shape"
         title.style['shape-inside'] = title_box.get_id(as_url=2)
+        self.add(title_box)
         self.add(title)
+        title_box.label = "title shape"
         title.label = "title text"
 
         desc_box = None
-        match gutter.position:
-            case gutter.Position.ABOVE:
-                desc_box_xywh = (
+        match self.gutter.position:
+            case Gutter.Position.ABOVE:
+                desc_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     (surround_bb.top + above_half_height +
                      half_stroke_width),
                     surround_bb.width - stroke_width,
                     above_half_height)
-            case gutter.Position.BELOW:
-                desc_box_xywh = (
+            case Gutter.Position.BELOW:
+                desc_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     (surround_bb.bottom - below_half_height -
                      half_stroke_width),
                     surround_bb.width - stroke_width,
                     below_half_height)
-            case gutter.Position.LEFT:
-                desc_box_xywh = (
+            case Gutter.Position.LEFT:
+                desc_box = inkex.Rectangle.new(
                     surround_bb.left + half_stroke_width,
                     (surround_bb.top + vertical_half_height +
                      half_stroke_width),
                     surround_bb.width * text_ratio - half_stroke_width,
                     vertical_half_height)
-            case gutter.Position.RIGHT:
-                desc_box_xywh = (
+            case Gutter.Position.RIGHT:
+                desc_box = inkex.Rectangle.new(
                     surround_bb.right - (surround_bb.width * text_ratio),
                     (surround_bb.top + vertical_half_height +
                      half_stroke_width),
                     surround_bb.width * text_ratio - half_stroke_width,
                     vertical_half_height)
 
-        # slightly inset the description box
-        desc_box = inkex.Rectangle.new(*desc_box_xywh)
         desc_box.style.set_color(inkex.Color('none'), 'stroke')
         desc_box.style.set_color(inkex.Color('none'), 'fill')
 
         desc = inkex.TextElement()
-        desc_text = inkex.Tspan()
-        desc.append(desc_text)
-        desc_text.text = self.description
-        desc.style['font-size'] = inkscape_svg.viewport_to_unit("8pt")
-        desc.style['line-height'] = "1"
+        desc.text = self.description
+        desc.style['font-size'] = INKSCAPE_SVG.viewport_to_unit("8pt")
         desc.style['text-anchor'] = "start"
-        self.add(desc_box)
-        desc_box.label = "description shape"
+        desc.style['line-height'] = "1"
         desc.style['shape-inside'] = desc_box.get_id(as_url=2)
+        self.add(desc_box)
         self.add(desc)
+        desc_box.label = "description shape"
         desc.label = "description text"
 
-    def draw_connector(self, gutter, duplicate=None):
-        ''' connect the surrounding rect and the old rect with a path '''
+    def draw_connector(self, duplicate: Optional[Self] = None) -> None:
+        """connect the surrounding rect and the old rect with a path"""
         path = inkex.PathElement()
-        path.style['stroke-width'] = inkscape_svg.viewport_to_unit("1mm")
+        path.style['stroke-width'] = INKSCAPE_SVG.viewport_to_unit("1mm")
         path.style.set_color(self.color, 'stroke')
         # Make it a connector
         path.set("inkscape:connector-type", "polyline")
@@ -463,9 +561,10 @@ class Annotation(inkex.Layer):
 
         path.label = "connector"
 
-    def update_rectangle_style(self, duplicate=None):
+    def update_rectangle_style(self) -> None:
+        """Give the user drawn rectangle a matching color and stroke style"""
         self.rectangle.style['stroke-width'] = (
-            inkscape_svg.viewport_to_unit("1mm"))
+            INKSCAPE_SVG.viewport_to_unit("1mm"))
         self.rectangle.style.set_color(self.color, 'stroke')
         self.rectangle.style.set_color(inkex.Color("none"), 'fill')
 
@@ -475,45 +574,43 @@ class Annotation(inkex.Layer):
         self.rectangle.label = "chip_location " + self.name
 
 
-def AnnotateBoard(selection_items, chip_items):
-    # Board image is the one with id 'board', or the biggest one
-    board_image = inkscape_svg.getElementById('board')
-    if board_image is None:
-        size = 0
-        for image in inkscape_svg.xpath("//svg:image"):
-            image_size = (float(image.get('width')) *
-                          float(image.get('height')))
-            if image_size > size:
-                size = image_size
-                board_image = image
-
+def annotate_board(selection_items: Gtk.ListStore,
+                   chip_items: Gtk.ListStore) -> None:
+    """Set up the gutters and iterate through the selections
+    drawing annotations"""
+    board_image = find_board_image()
     gutter_a, gutter_b = None, None
-    if yaml_config['gutter'] == 'horizontal':
+    if YAML_CONFIG['gutter'] == 'horizontal':
         gutter_a = Gutter(Gutter.Position.ABOVE, board_image)
         gutter_b = Gutter(Gutter.Position.BELOW, board_image)
-    elif yaml_config['gutter'] == 'vertical':
+    elif YAML_CONFIG['gutter'] == 'vertical':
         gutter_a = Gutter(Gutter.Position.LEFT, board_image)
         gutter_b = Gutter(Gutter.Position.RIGHT, board_image)
+    else:
+        raise ValueError("Bad 'gutter' type in YAML config")
 
     colors = AnnotateColors()
 
-    iter_selection = selection_items.get_iter_first()
-    completed = []
-    while iter_selection:
+    completed: List[Annotation] = []
+    for selection in selection_items:
         # Create annotation
-        chip_name = selection_items.get_value(iter_selection, 2)
-        iter_chip = chip_items.get_iter_first()
-        while chip_items.get_value(iter_chip, 0) != chip_name:
-            iter_chip = chip_items.iter_next(iter_chip)
-        annotation = Annotation(
-            rectangle=inkscape_svg.getElementById(
-                selection_items.get_value(iter_selection, 1)),
-            name=chip_name,
-            description=chip_items.get_value(iter_chip, 1),
-            image_path=chip_items.get_value(iter_chip, 2),
-            gdkpixbuf=chip_items.get_value(iter_chip, 3),
-            color=colors.next())
+        annotation: Optional[Annotation] = None
+        for chip in chip_items:
+            if (chip_items.get_value(chip.iter, 0) ==
+                    selection_items.get_value(selection.iter, 2)):
+                annotation = Annotation(
+                    rectangle=INKSCAPE_SVG.getElementById(
+                        selection_items.get_value(selection.iter, 1)),
+                    name=chip_items.get_value(chip.iter, 0),
+                    description=chip_items.get_value(chip.iter, 1),
+                    image_path=chip_items.get_value(chip.iter, 2),
+                    gdkpixbuf=chip_items.get_value(chip.iter, 3),
+                    color=colors.next())
 
+        if Annotation is None:
+            raise TypeError("Failed to create Annotation for"
+                            f"{selection_items.get_value(selection.iter, 2)}")
+        assert annotation is not None
         # TODO still not happy with this method
         # Some ideas
         # - config option to select a distribution method
@@ -527,27 +624,53 @@ def AnnotateBoard(selection_items, chip_items):
         # Probably easiest to store up the annotations, then pick a method
         # collection.deque can do operations from either side
 
-        duplicate = [anno for anno in completed if anno.name == chip_name]
+        duplicate = [anno for anno in completed
+                     if anno.name == annotation.name]
         if duplicate:
             # Already drew an annotation for this chip
             # connect to it instead of drawing again
             annotation.draw_existing(duplicate[0])
         # Annotations go into the next position on gutter A or B
         # based on which is more empty, and which is closer
-        elif (gutter_a.index - gutter_b.index) > 1:
-            annotation.draw(gutter_b)
-        elif (gutter_b.index - gutter_a.index) > 1:
-            annotation.draw(gutter_a)
         else:
-            closest = closest_gutter(annotation, gutter_a, gutter_b)
-            annotation.draw(closest)
+            if (gutter_a.index - gutter_b.index) > 1:
+                annotation.draw(gutter_b)
+            elif (gutter_b.index - gutter_a.index) > 1:
+                annotation.draw(gutter_a)
+            else:
+                closest = closest_gutter(annotation, gutter_a, gutter_b)
+                annotation.draw(closest)
 
         completed.append(annotation)
 
-        iter_selection = selection_items.iter_next(iter_selection)
+
+def find_board_image() -> inkex.Image:
+    '''Return the board image in the main SVG'''
+    # Try the one with id 'board'
+    board_image = INKSCAPE_SVG.getElementById('board')
+    if board_image is not None and board_image.tag_name == 'image':
+        return board_image
+
+    # Find the biggest image
+    size = 0.0
+    for image in INKSCAPE_SVG.xpath("//svg:image"):
+        image_size = (float(image.get('width')) *
+                      float(image.get('height')))
+        if image_size > size:
+            size = image_size
+            board_image = image
+
+    if board_image is not None:
+        return board_image
+
+    raise RuntimeError(
+        "Could not find a board image in the SVG."
+        "Check there is at least one image."
+        "The board image can be designated by assigning it id 'board'.")
 
 
 class AnnotateColors:
+    """Color palettes for giving each annotation a unique color"""
     # These are SVG named colors
     # I removed things near whites, greys, blacks, browns, and beiges
     # default was rearranged to try to produce non-consecutive shades
@@ -572,9 +695,13 @@ class AnnotateColors:
               'mediumseagreen', 'mediumslateblue', 'mediumspringgreen',
               'mediumturquoise', 'mediumvioletred']
 
-    def __init__(self):
-        if 'palette' in yaml_config:
-            palette = yaml_config['palette']
+    def __init__(self) -> None:
+        """Read the palette configuration
+        and set up generator for returning colors"""
+        AnnotateColors.validate_colors(YAML_CONFIG)
+
+        if 'palette' in YAML_CONFIG:
+            palette = YAML_CONFIG['palette']
         else:
             palette = 'default'
 
@@ -590,24 +717,53 @@ class AnnotateColors:
             case 'all':
                 self.iterator = self.color_gen(self.default + self.dark +
                                                self.light + self.medium)
+            # NOTE: random still repeats after all the colors have been used
             case 'all_random':
                 full_list = self.default + self.dark + self.light + self.medium
                 random.shuffle(full_list)
                 self.iterator = self.color_gen(full_list)
             case 'custom' | 'custom_random':
-                if 'colors' in yaml_config:
-                    colors = yaml_config['colors']
+                colors = YAML_CONFIG['colors']
+                for color in colors:
+                    inkex.Color(color)
+
+                if palette == 'custom_random':
+                    random.shuffle(colors)
+
+                self.iterator = self.color_gen(colors)
+
+    def next(self) -> str:
+        """Get the next color to be used"""
+        return next(self.iterator)
+
+    def color_gen(self,
+                  colors: List[str]) -> Generator[str, None, None]:
+        """Generator that returns infinite colors (sequence repeats)"""
+        while True:
+            yield from colors
+
+    @staticmethod
+    def validate_colors(config: Dict[str, Any]) -> None:
+        """Check for valid color config"""
+        if 'palette' in config:
+            palette = config['palette']
+        else:
+            return  # no palette is a valid config
+
+        match palette:
+            case ('default' | 'light' | 'dark' | 'medium' | 'all' |
+                  'all_random'):
+                pass
+            case 'custom' | 'custom_random':
+                if 'colors' in config:
+                    colors = config['colors']
                     for color in colors:
                         try:
                             inkex.Color(color)
-                        except inkex.colors.ColorError:
+                        except inkex.colors.ColorError as exc:
                             inkex.utils.errormsg(
                                 f"Invalid color in 'custom' palette: {color}")
-                            raise inkex.utils.AbortExtension
-
-                    if palette == 'custom_random':
-                        random.shuffle(colors)
-                    self.iterator = self.color_gen(colors)
+                            raise inkex.utils.AbortExtension from exc
                 else:
                     inkex.utils.errormsg(
                         "No color list found for 'custom' palette")
@@ -617,15 +773,11 @@ class AnnotateColors:
                     f"Unknown palette in YAML config: {palette}")
                 raise inkex.utils.AbortExtension
 
-    def next(self):
-        return next(self.iterator)
 
-    def color_gen(self, colors):
-        while True:
-            yield from colors
-
-
-def closest_gutter(annotation, gutter_a, gutter_b):
+def closest_gutter(annotation: Annotation, gutter_a: Gutter,
+                   gutter_b: Gutter) -> Gutter:
+    """Return the closest gutter to the annotation user-drawn rectangle
+    according to the next empty space"""
     rect = annotation.rectangle
     rect_transform = inkex.Transform(rect.get('transform'))
     rect_corners = list(
@@ -648,25 +800,31 @@ def closest_gutter(annotation, gutter_a, gutter_b):
 
     if (rect_to_a0[0] + rect_to_a1[0]) <= (rect_to_b0[0] + rect_to_b1[0]):
         return gutter_a
-    else:
-        return gutter_b
+
+    return gutter_b
 
 
-def chip_context_image(rect, selections):
-    image = svg_without_selections_as_pixbuf(inkscape_svg, selections, rect)
+def chip_context_image(rect: inkex.Rectangle,
+                       selections: Gtk.ListStore) -> GdkPixbuf.Pixbuf:
+    """Create an image of the context around a user-drawn rectangle"""
+    # TODO this is a bit expensive (rendering the whole svg)
+    # currently doing so to scale things
+    # but we could just pick some fraction of the svg size (same size contexts)
+    # or multiple of the rectangle size (results in different size contexts)
+    image = svg_without_selections_as_pixbuf(INKSCAPE_SVG, selections, rect)
     render_width = image.get_width()
     render_height = image.get_height()
-    svg_width = inkscape_svg.viewbox_width
-    svg_height = inkscape_svg.viewbox_height
+    svg_width = INKSCAPE_SVG.viewbox_width
+    svg_height = INKSCAPE_SVG.viewbox_height
     # average, because I'm not getting consistent scale factors
     # TODO sort out what the render makes vs what inkscape says
     scale_factor = (render_width/svg_width + render_height/svg_height)/2
 
     # Rectangle dimensions
     size = 400
-    bb = rect.bounding_box()
-    context_x = max(0, bb.center_x * scale_factor - ((size)/2))
-    context_y = max(0, bb.center_y * scale_factor - ((size)/2))
+    rect_bb = rect.bounding_box()
+    context_x = max(0, rect_bb.center_x * scale_factor - ((size)/2))
+    context_y = max(0, rect_bb.center_y * scale_factor - ((size)/2))
 
     # Don't go past the render boundary
     context_width = size
@@ -684,7 +842,12 @@ def chip_context_image(rect, selections):
         context_x, context_y, context_width, context_height)
 
 
-def svg_without_selections_as_pixbuf(svg, selections, keep_rect=None):
+def svg_without_selections_as_pixbuf(
+    svg: inkex.SvgDocumentElement, selections: Gtk.ListStore,
+        keep_rect: inkex.Rectangle = None) -> GdkPixbuf.Pixbuf:
+    """Return a pixbuf render of the svg
+    with keep_rect visible as a red unfilled rectangle,
+    and all other selections removed"""
     # copy SVG, remove selections, except keep_rect
     temp_svg = copy.deepcopy(svg)
     for rect in selections:
@@ -703,126 +866,60 @@ def svg_without_selections_as_pixbuf(svg, selections, keep_rect=None):
     return GdkPixbuf.Pixbuf.new_from_stream(stream, None)
 
 
-class BA_Image(inkex.Rectangle):
+class BoardAnnotateImage(inkex.Rectangle):
     'A simple image, just enough for positioning, and embedding file contents'
     tag_name = 'image'
 
-    def embed_image(self, file_path):
+    def embed_image(self, file_path: str) -> None:
+        """base64 encode the image and place it in an svg element"""
         # Borrowed from Inkscape 1.5 inkex.elements._image
         # Copyright (c) 2020 Martin Owens
         with open(file_path, "rb") as handle:
-            file_type = get_image_type(file_path, handle.read(10))
+            file_type = BoardAnnotateImage.get_image_type(
+                file_path, handle.read(10))
             handle.seek(0)
             if file_type:
                 self.set(
                     "xlink:href",
-                    "data:{};base64,{}".format(
-                        file_type,
-                        base64.encodebytes(
-                            handle.read()).decode("ascii")
-                    ),
-                )
+                    f"data:{file_type};"
+                    "base64,"
+                    f"{base64.encodebytes(handle.read()).decode('ascii')}")
             else:
                 raise ValueError(
                     f"{file_path} is not of type image/png, image/jpeg, "
                     "image/bmp, image/gif, image/tiff, or image/x-icon")
 
+    @staticmethod
+    def get_image_type(path: str, header: bytes) -> Optional[str]:
+        """Basic magic header checker, returns mime type"""
+        # Borrowed from inkscape extension image_embed.py
+        # Copyright (c) 2005,2007 Aaron Spike
+        for head, mime in (
+            (b"\x89PNG", "image/png"),
+            (b"\xff\xd8", "image/jpeg"),
+            (b"BM", "image/bmp"),
+            (b"GIF87a", "image/gif"),
+            (b"GIF89a", "image/gif"),
+            (b"MM\x00\x2a", "image/tiff"),
+            (b"II\x2a\x00", "image/tiff"),
+        ):
+            if header.startswith(head):
+                return mime
 
-def get_image_type(path, header):
-    """Basic magic header checker, returns mime type"""
-    # Borrowed from inkscape extension image_embed.py
-    # Copyright (c) 2005,2007 Aaron Spike
-    for head, mime in (
-        (b"\x89PNG", "image/png"),
-        (b"\xff\xd8", "image/jpeg"),
-        (b"BM", "image/bmp"),
-        (b"GIF87a", "image/gif"),
-        (b"GIF89a", "image/gif"),
-        (b"MM\x00\x2a", "image/tiff"),
-        (b"II\x2a\x00", "image/tiff"),
-    ):
-        if header.startswith(head):
-            return mime
-
-    # ico files lack any magic... therefore we check the filename instead
-    for ext, mime in (
-        # official IANA registered MIME is 'image/vnd.microsoft.icon' tho
-        (".ico", "image/x-icon"),
-        (".svg", "image/svg+xml"),
-    ):
-        if path.endswith(ext):
-            return mime
-    return None
+        # ico files lack any magic... therefore we check the filename instead
+        for ext, mime in (
+            # official IANA registered MIME is 'image/vnd.microsoft.icon' tho
+            (".ico", "image/x-icon"),
+            (".svg", "image/svg+xml"),
+        ):
+            if path.endswith(ext):
+                return mime
+        return None
 
 
-def _debug_print(*args):
+def _debug_print(*args: List[str]) -> None:
     'Implement print in terms of inkex.utils.debug.'
     inkex.utils.debug(' '.join([str(a) for a in args]))
-
-
-def sort_check_selection(selection, gutter):
-    '''Sort selection rectangles left to right or top to bottom
-    also checks for invalid selections, and a valid gutter setting'''
-    for item in inkscape_svg.selection:
-        if str(item) != 'rect':
-            item_id = item.get_id()
-            inkex.utils.errormsg(
-                f"Invalid items selected\n"
-                f"Found '{str(item)}':'{item_id}' in selection\n"
-                f"Board annotate only works on rectangles")
-            raise inkex.utils.AbortExtension
-    if gutter == "horizontal":
-        return sorted(selection,
-                      key=lambda e: float(e.bounding_box().center_x))
-    elif gutter == "vertical":
-        return sorted(selection,
-                      key=lambda e: float(e.bounding_box().center_y))
-    else:
-        raise ValueError("YAML config gutter is not "
-                         "'horizontal' or 'vertical' ")
-
-
-class BoardAnnotateExtension(inkex.EffectExtension):
-    'Annotate a circuit board with images'
-    def __init__(self, svg=None):
-        super().__init__()
-
-    def add_arguments(self, pars):
-        pars.add_argument('--yaml-file', type=str,
-                          help='Board YAML configuration')
-        pars.add_argument('--tab', dest='tab',
-                          help='The selected UI tab when Apply was pressed')
-
-    def effect(self):
-        global yaml_file
-        global yaml_config
-        global inkscape_svg
-
-        yaml_file = self.options.yaml_file
-        yaml_config = None
-        inkscape_svg = self.svg
-
-        if (yaml_file is not None and not os.path.isdir(yaml_file)):
-            # see https://gitlab.com/inkscape/inkscape/-/issues/2822
-            # for why isdir check is used
-            with open(yaml_file, 'r') as file:
-                yaml_config = yaml.safe_load(file)
-
-        # validate color settings in the yaml config
-        # (so user gets warned before trying to match chips)
-        temp = AnnotateColors()
-        temp.next()  # so linter doesn't warn about unused variable
-        del temp
-        try:
-            sorted_selection = sort_check_selection(
-                inkscape_svg.selection, yaml_config['gutter'])
-        except ValueError as ve:
-            inkex.utils.errormsg(ve)
-            raise inkex.utils.AbortExtension
-        # TODO probably could do some more early checks
-
-        SelectionApp(start_loop=True,
-                     selection=sorted_selection)
 
 
 if __name__ == '__main__':

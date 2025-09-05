@@ -1,0 +1,20 @@
+[tool.pylint]
+ignored-modules = ["inkex", "inkex.gui"]
+
+[tool.pylint.'MESSAGES CONTROL']
+disable = "fixme"
+
+[tool.pylint.'REPORTS']
+output-format = "colorized"
+
+[tool.mypy]
+mypy_path = "/usr/share/inkscape/extensions"
+strict = true
+ignore_missing_imports = true
+follow_imports = "silent"
+# inkex seems to have dynamic types that are treated as Any
+allow_subclassing_any = true
+
+[[tool.mypy.overrides]]
+module = "inkex.*"
+follow_imports = "skip"

@@ -485,15 +485,15 @@ class Annotation(inkex.Layer):
 
         title_box.style.set_color(inkex.Color('none'), 'stroke')
         title_box.style.set_color(inkex.Color('none'), 'fill')
+        self.add(title_box)
+        title_box.label = "title shape"
 
         title = inkex.TextElement()
         title.text = self.name
         title.style['font-size'] = INKSCAPE_SVG.viewport_to_unit("10pt")
         title.style['text-anchor'] = "middle"
         title.style['shape-inside'] = title_box.get_id(as_url=2)
-        self.add(title_box)
         self.add(title)
-        title_box.label = "title shape"
         title.label = "title text"
 
         desc_box = None
@@ -529,6 +529,8 @@ class Annotation(inkex.Layer):
 
         desc_box.style.set_color(inkex.Color('none'), 'stroke')
         desc_box.style.set_color(inkex.Color('none'), 'fill')
+        self.add(desc_box)
+        desc_box.label = "description shape"
 
         desc = inkex.TextElement()
         desc.text = self.description
@@ -536,9 +538,7 @@ class Annotation(inkex.Layer):
         desc.style['text-anchor'] = "start"
         desc.style['line-height'] = "1"
         desc.style['shape-inside'] = desc_box.get_id(as_url=2)
-        self.add(desc_box)
         self.add(desc)
-        desc_box.label = "description shape"
         desc.label = "description text"
 
     def draw_connector(self, duplicate: Optional[Self] = None) -> None:

@@ -30,7 +30,7 @@ import argparse
 import yaml
 import inkex
 import inkex.gui
-from gi.repository import Gtk, GdkPixbuf, Gio, GLib
+from gi.repository import Gtk, GdkPixbuf, Gio, GLib, GObject, Gdk
 
 
 # Globals
@@ -81,6 +81,12 @@ class BoardAnnotateExtension(inkex.EffectExtension):
     def sort_check_selection(self) -> inkex.elements._selected.ElementList:
         """Sort selection rectangles left to right or top to bottom
         also checks for invalid selections, and a valid gutter setting"""
+        if len(INKSCAPE_SVG.selection) == 0:
+            inkex.utils.errormsg(
+                "No items selected. Board annotate needs "
+                "at least one rectangle selected to annotate")
+            raise inkex.utils.AbortExtension
+
         for item in INKSCAPE_SVG.selection:
             if str(item) != 'rect':
                 item_id = item.get_id()
@@ -100,48 +106,70 @@ class BoardAnnotateExtension(inkex.EffectExtension):
                          "'horizontal' or 'vertical' ")
 
 
-class ChipSelection(Gtk.CellRendererCombo):
-    """ComboBox for selecting chip names"""
-    def __init__(self, model: Gtk.TreeModel, selection_items: Gtk.ListStore,
-                 apply_button: Gtk.Button, info_label: Gtk.Label) -> None:
-        """configure combobox and connect edit signal"""
+class ChipItem(GObject.Object):
+    '''Info and images for a chip'''
+    name = ''
+    description = ''
+    image_path = ''
+    image = None
+    widget = None
+
+    def __init__(self, builder: Gtk.Builder, name: str, description: str,
+                 image_path: str) -> None:
         super().__init__()
-        self.set_property('editable', True)
-        self.set_property('model', model)
-        self.set_property('text-column', 0)
-        self.set_property('has-entry', False)
-        self.connect('edited', self.on_combo_changed,
-                     selection_items, apply_button, info_label)
 
-    def on_combo_changed(self, widget: Gtk.Widget, path: str, text: str,
-                         selection_items: Gtk.ListStore,
-                         apply_button: Gtk.Button,
-                         info_label: Gtk.Label) -> None:
-        """Enable apply button if all combos are selected.
-        Or update info label to reflect remaining unselected count"""
-        selection_items[path][2] = text
-        item_iter = selection_items.get_iter_first()
-        item_remaining_count = selection_items.iter_n_children()
+        self.name = name
+        self.description = description
+        self.image_path = image_path
+        if image_path and not os.path.isabs(image_path):
+            self.image_path = os.path.join(
+                os.path.dirname(YAML_FILE), image_path)
 
-        while item_iter:
-            if selection_items.get_value(item_iter, 2) == "Select a chip":
-                apply_button.set_sensitive(False)
-            else:
-                item_remaining_count -= 1
+        self.tooltip_image = (None if image_path == "" else
+                              GdkPixbuf.Pixbuf.new_from_file_at_size(
+                                  self.image_path, 256, 256))
 
-            item_iter = selection_items.iter_next(item_iter)
+        if self.tooltip_image is not None:
+            icon_width = self.tooltip_image.get_width() / 8
+            icon_height = self.tooltip_image.get_height() / 8
+            self.icon_image = GdkPixbuf.Pixbuf.new(
+                self.tooltip_image.get_colorspace(),
+                self.tooltip_image.get_has_alpha(),
+                self.tooltip_image.get_bits_per_sample(),
+                icon_width, icon_height)
+            self.tooltip_image.scale(self.icon_image,
+                                     0, 0, icon_width, icon_height,
+                                     0, 0, 1/8, 1/8,
+                                     GdkPixbuf.InterpType.BILINEAR)
 
-        if item_remaining_count == 0:
-            info_label.set_text("All images are assigned")
-            apply_button.set_sensitive(True)
-        else:
-            info_label.set_text(str(item_remaining_count) +
-                                " images left to assign.")
-            info_label.show()
+        self.widget = builder.get_object('chip_item')
+        chip_name = builder.get_object('chip_name')
+        chip_name.set_markup('<big><b>' + self.name + '</b></big>')
+        Gtk.Widget.set_tooltip_text(chip_name, self.description)
+
+        if self.icon_image:
+            self.image = GdkPixbuf.Pixbuf.new_from_file(self.image_path)
+            chip_image = builder.get_object('chip_image')
+            chip_image.set_from_pixbuf(self.icon_image)
+            chip_image.set_has_tooltip(True)
+            chip_image.connect('query-tooltip', self.on_query_tooltip)
+
+    def on_query_tooltip(self, widget: Gtk.Widget, tooltip_x: int,
+                         tooltip_y: int, keyboard_mode: bool,
+                         tooltip: Gtk.Tooltip) -> bool:
+        '''Set image tooltip to larger image'''
+        # pylint: disable=unused-argument
+        tooltip.set_icon(self.tooltip_image)
+        return True
+
+    @classmethod
+    def as_widget(cls, chipitem: Self) -> Gtk.Widget:
+        '''Return associated widget for bind_model use'''
+        return chipitem.widget
 
 
 class SelectionWindow(inkex.gui.Window):
-    """Window with Treeview for matching chips to the board image rectangles"""
+    """Window for matching chips to the board image rectangles"""
     primary = True
     name = "board_annotate"
 
@@ -150,50 +178,197 @@ class SelectionWindow(inkex.gui.Window):
         super().__init__(widget, *args, **kwargs)
 
         # Chips defined in user provide yaml
-        chip_items = self.widget('chip_items')
+        self.chip_items = Gio.ListStore.new(ChipItem)
         for chip in YAML_CONFIG['chips']:
-            chip_image_path = chip['chip_photo']
-            if not os.path.isabs(chip_image_path) and chip['chip_photo']:
-                chip_image_path = os.path.join(
-                    os.path.dirname(YAML_FILE), chip['chip_photo'])
-            # NOTE chip_items last column is GdkPixbuf for the chip image
-            #      maybe a better UI would load the image and display it
-            #      Right now it is only loaded to get the image dimensions
-            chip_items.append(
-                [chip['name'], chip['description'], chip_image_path,
-                 None if chip_image_path == "" else
-                 GdkPixbuf.Pixbuf.new_from_file(chip_image_path)])
+            builder = Gtk.Builder()
+            builder.add_from_file(self.gapp.get_ui_file(self.name))
+            self.chip_items.append(
+                ChipItem(builder, chip['name'], chip['description'],
+                         chip['chip_photo']))
 
-        # User selected rectangles to be match with a chip
+        chip_list_box = self.widget('chip_list_box')
+        chip_list_box.bind_model(self.chip_items, ChipItem.as_widget)
+        chip_list_box.connect('row-activated', self.update_match)
+
+        self.widget('chip_reverse').connect('toggled', self.update_reverse)
+
+        # User selected rectangles to be matched with a chip
         selection_items = self.widget('selection_items')
         for rect in self.gapp.kwargs['selection']:
-            context_image = chip_context_image(rect,
-                                               self.gapp.kwargs['selection'])
-            selection_items.append([context_image, rect.get("id"),
-                                    "Select a chip"])
+            svg_render = svg_without_selections_as_pixbuf(
+                INKSCAPE_SVG, self.gapp.kwargs['selection'])
+            icon_image = rect_icon_image(rect, svg_render)
 
-        # Column for chip selection
-        apply_button = self.widget('apply_button')
-        info_label = self.widget('info_label')
-        chip_combo_renderer = ChipSelection(chip_items, selection_items,
-                                            apply_button, info_label)
-        chip_selection_column = Gtk.TreeViewColumn(
-            "Chip (click twice)", chip_combo_renderer, text=2)
-        selections_tree_view = self.widget('selections_tree_view')
-        selections_tree_view.append_column(chip_selection_column)
+            context_image = chip_context_image(
+                rect, self.gapp.kwargs['selection'])
+            selection_items.append([context_image, icon_image, rect.get("id"),
+                                    "", False, icon_image.copy()])
+
+        self.selections_icon_view = self.widget('selections_icon_view')
+        self.selections_icon_view.set_pixbuf_column(5)
+        self.selections_icon_view.set_text_column(2)
+        self.selections_icon_view.set_item_width(64)
+        self.selections_icon_view.connect('selection-changed',
+                                          self.update_selection)
+        self.selections_icon_view.select_path(
+            selection_items.get_path(selection_items.get_iter_first()))
+
+        accel_group = Gtk.AccelGroup()
+        self.window.add_accel_group(accel_group)
+        for accel in ['k', '<Shift>k']:
+            key, mods = Gtk.accelerator_parse(accel)
+            accel_group.connect(key, mods, 0, self.prev_selection)
+        for accel in ['j', '<Shift>j']:
+            key, mods = Gtk.accelerator_parse(accel)
+            accel_group.connect(key, mods, 0, self.next_selection)
+        self.widget('previous_match_button').connect(
+            'clicked', self.prev_selection)
+        self.widget('next_match_button').connect(
+            'clicked', self.next_selection)
 
         self.widget('close_button').connect('clicked', self.on_close_clicked)
         self.widget('apply_button').connect('clicked', self.on_apply_clicked,
-                                            selection_items, chip_items)
+                                            selection_items, self.chip_items)
+        self.populate_status_bar(selection_items)
 
         self.window.show_all()
         self.window.connect("destroy", Gtk.main_quit)
 
+    def prev_selection(self, accel: Gtk.AccelGroup = None,
+                       key: Optional[int] = None,
+                       mods: Gdk.ModifierType = None,
+                       accel_flags: Gtk.AccelFlags = None) -> None:
+        '''Move selections_icon_view selection back, and update display'''
+        # pylint: disable=unused-argument
+        path = self.selections_icon_view.get_selected_items()
+        model = self.selections_icon_view.get_model()
+        icon_view_iter = model.get_iter(path)
+        icon_view_iter = model.iter_previous(icon_view_iter)
+        if icon_view_iter is None:
+            # loop to the end of the list
+            icon_view_iter = model.get_iter_first()
+            while model.iter_next(icon_view_iter):
+                icon_view_iter = model.iter_next(icon_view_iter)
+
+            self.selections_icon_view.select_path(
+                model.get_path(icon_view_iter))
+            self.selections_icon_view.set_cursor(
+                model.get_path(icon_view_iter), None, False)
+        else:
+            self.selections_icon_view.select_path(
+                model.get_path(icon_view_iter))
+            self.selections_icon_view.set_cursor(
+                model.get_path(icon_view_iter), None, False)
+
+    def next_selection(self, accel: Gtk.AccelGroup = None,
+                       key: Optional[int] = None,
+                       mods: Gdk.ModifierType = None,
+                       accel_flags: Gtk.AccelFlags = None) -> None:
+        '''Move selections_icon_view selection forward, and update display'''
+        # pylint: disable=unused-argument
+        path = self.selections_icon_view.get_selected_items()
+        model = self.selections_icon_view.get_model()
+        icon_view_iter = model.get_iter(path)
+        icon_view_iter = model.iter_next(icon_view_iter)
+        if icon_view_iter is None:
+            self.selections_icon_view.select_path(model.get_path(
+                model.get_iter_first()))
+            self.selections_icon_view.set_cursor(model.get_path(
+                model.get_iter_first()), None, False)
+        else:
+            self.selections_icon_view.select_path(
+                model.get_path(icon_view_iter))
+            self.selections_icon_view.set_cursor(
+                model.get_path(icon_view_iter), None, False)
+
+    def update_reverse(self, checkbox: Gtk.CheckButton) -> None:
+        '''Update selection when 'On Reverse' checkbox is toggled'''
+        selection_model = self.selections_icon_view.get_model()
+        selection_path = self.selections_icon_view.get_selected_items()
+        selection_model.set_value(
+            selection_model.get_iter(selection_path), 4,
+            checkbox.get_active())
+
+    def update_match(self, box: Gtk.ListBox = None,
+                     row: Gtk.ListBoxRow = None,
+                     userdata: None = None) -> None:
+        ''' Update selection when match info has changed '''
+        # pylint: disable=unused-argument
+        selection_items = self.selections_icon_view.get_model()
+        selection_path = self.selections_icon_view.get_selected_items()
+        if box:
+            selected_chip_row = box.get_selected_row()
+            if selected_chip_row:
+                selected_chip_index = selected_chip_row.get_index()
+                selection_items.set_value(
+                    selection_items.get_iter(selection_path), 3,
+                    self.chip_items[selected_chip_index].name)
+
+        selection_items[selection_path][1].saturate_and_pixelate(
+            selection_items[selection_path][5], 0.5, True)
+
+        self.widget('selection_label').set_text(
+                selection_items[selection_path][2] +
+                (" [" + selection_items[selection_path][3] + "]"
+                 if selection_items[selection_path][3] else ""))
+
+        apply_button = self.widget('apply_button')
+        if self.populate_status_bar(selection_items) == 0:
+            apply_button.set_sensitive(True)
+        else:
+            apply_button.set_sensitive(False)
+
+    def populate_status_bar(self, selection_items: Gtk.ListStore) -> int:
+        '''Set the status bar message (remaining match count)'''
+        item_iter = selection_items.get_iter_first()
+        item_remaining_count: int = selection_items.iter_n_children()
+        while item_iter:
+            if selection_items.get_value(item_iter, 3) != "":
+                item_remaining_count -= 1
+            item_iter = selection_items.iter_next(item_iter)
+
+        status_bar = self.widget('status_bar')
+        context_id = status_bar.get_context_id("update_match")
+        if item_remaining_count == 0:
+            status_bar.push(context_id, "All images are assigned")
+        else:
+            status_bar.push(context_id, str(item_remaining_count) +
+                            " images left to assign.")
+
+        return item_remaining_count
+
+    def update_selection(self, view: Gtk.IconView) -> None:
+        ''' Update the view when a selection as changed '''
+        selection_items = self.widget('selection_items')
+        path = view.get_selected_items()
+        if path:
+            self.widget('selection_context_image').set_from_pixbuf(
+                selection_items[path][0])
+            self.widget('selection_label').set_text(
+                selection_items[path][2] +
+                (" [" + selection_items[path][3] + "]"
+                 if selection_items[path][3] else ""))
+            self.widget('chip_reverse').set_active(
+                selection_items[path][4])
+            match = selection_items[path][3]
+            if match:
+                chip_index = 0
+                while self.chip_items.get_item(chip_index).name != match:
+                    chip_index += 1
+
+                chip_box = self.widget('chip_list_box')
+                row = chip_box.get_row_at_index(chip_index)
+                chip_box.select_row(row)
+            else:
+                self.widget('chip_list_box').unselect_all()
+
     def on_close_clicked(self, button: Gtk.Button) -> None:
         """Exit the extension"""
+        # pylint: disable=unused-argument
         Gtk.main_quit()
 
-    def on_apply_clicked(self, button: Gtk.Button,
+    def on_apply_clicked(self,
+                         button: Gtk.Button,  # pylint: disable=unused-argument
                          selection_items: Gtk.ListStore,
                          chip_items: Gtk.ListStore) -> None:
         """Modify the svg and exit the extension"""
@@ -203,8 +378,8 @@ class SelectionWindow(inkex.gui.Window):
 
 class SelectionApp(inkex.gui.GtkApp):
     """inkex GtkApp"""
-    glade_dir = os.path.join(os.path.dirname(__file__))
-    app_name = "inkscape_board_annotate"
+    ui_dir = os.path.join(os.path.dirname(__file__))
+    app_name = "org.epakai.extension.board_annotate"
     windows = [SelectionWindow]
 
 
@@ -357,13 +532,14 @@ class Annotation(inkex.Layer):
     """Annotation as an inkscape layer"""
     def __init__(self, rectangle: inkex.Rectangle, name: str, description: str,
                  image_path: str, gdkpixbuf: GdkPixbuf.Pixbuf,
-                 color: str) -> None:
+                 color: str, reverse: bool) -> None:
         self.rectangle = rectangle
         self.name = name
         self.description = description
         self.image_path = image_path
         self.gdkpixbuf = gdkpixbuf
         self.color = inkex.Color(color)
+        self.reverse = reverse
 
         self.gutter: Optional[Gutter] = None  # set in draw
         self.svg_image: inkex.Image = None  # set in draw_image
@@ -567,6 +743,10 @@ class Annotation(inkex.Layer):
             INKSCAPE_SVG.viewport_to_unit("1mm"))
         self.rectangle.style.set_color(self.color, 'stroke')
         self.rectangle.style.set_color(inkex.Color("none"), 'fill')
+        if self.reverse:
+            # TODO dashes are unsatisfactory
+            self.rectangle.style['stroke-dasharray'] = '2,1'
+            self.rectangle.style['stroke-dashoffset'] = 0
 
         # Originally I grouped the user drawn rectangles with everything,
         # but that makes it harder to re-position the annotation, so don't
@@ -595,17 +775,22 @@ def annotate_board(selection_items: Gtk.ListStore,
     for selection in selection_items:
         # Create annotation
         annotation: Optional[Annotation] = None
-        for chip in chip_items:
-            if (chip_items.get_value(chip.iter, 0) ==
-                    selection_items.get_value(selection.iter, 2)):
+        chip_index = 0
+        while chip_items.get_item(chip_index) is not None:
+            chip_item = chip_items.get_item(chip_index)
+            if (chip_item.name == selection_items.get_value(selection.iter,
+                                                            3)):
                 annotation = Annotation(
                     rectangle=INKSCAPE_SVG.getElementById(
-                        selection_items.get_value(selection.iter, 1)),
-                    name=chip_items.get_value(chip.iter, 0),
-                    description=chip_items.get_value(chip.iter, 1),
-                    image_path=chip_items.get_value(chip.iter, 2),
-                    gdkpixbuf=chip_items.get_value(chip.iter, 3),
-                    color=colors.next())
+                        selection_items.get_value(selection.iter, 2)),
+                    name=chip_item.name,
+                    description=chip_item.description,
+                    image_path=chip_item.image_path,
+                    gdkpixbuf=chip_item.image,
+                    color=colors.next(),
+                    reverse=selection_items.get_value(selection.iter, 4))
+
+            chip_index += 1
 
         if Annotation is None:
             raise TypeError("Failed to create Annotation for"
@@ -840,6 +1025,31 @@ def chip_context_image(rect: inkex.Rectangle,
     #       It looks odd, but provides context that we're beyond the image edge
     return image.new_subpixbuf(
         context_x, context_y, context_width, context_height)
+
+
+def rect_icon_image(rect: inkex.Rectangle,
+                    base_image: GdkPixbuf.Pixbuf) -> GdkPixbuf.Pixbuf:
+    """Return an icon image of the rectangle"""
+    render_width = base_image.get_width()
+    render_height = base_image.get_height()
+    svg_width = INKSCAPE_SVG.viewbox_width
+    svg_height = INKSCAPE_SVG.viewbox_height
+
+    scale_factor = (render_width/svg_width + render_height/svg_height)/2
+
+    rect_bb = rect.bounding_box()
+    new_width = 2 * round(rect_bb.width * scale_factor * 1.4 / 2)
+    new_height = 2 * round(rect_bb.height * scale_factor * 1.4 / 2)
+    # make it square
+    if new_width > new_height:
+        new_height = new_width
+    else:
+        new_width = new_height
+    new_x = rect_bb.center_x * scale_factor - (new_width / 2)
+    new_y = rect_bb.center_y * scale_factor - (new_height / 2)
+
+    crop_image = base_image.new_subpixbuf(new_x, new_y, new_width, new_height)
+    return crop_image.scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)
 
 
 def svg_without_selections_as_pixbuf(

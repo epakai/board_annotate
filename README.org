@@ -13,7 +13,7 @@ All images are embedded in the SVG (for now).
 
 * Install 
 
-For now, put the 'board_annotate' py, ui, and inx files into =~/.config/inkscape/extensions=.
+For now, put the 'board_annotate' py, ui, and inx files into the directory indicated by =Edit -> Preferences -> System: User extensions=.
 
 It should appear in Inkscape's =Extensions -> Render= menu as 'Board Annotate'.
 
@@ -55,9 +55,12 @@ For empty fields, use "". =chip_photo= and =description= can be empty
 
 ** The extension
 - select your yaml file with the file picker, hit apply
-- match chips to images (click on 'Select a chip' twice to open the selection)
+- match chips to images 
+    + select each chip from the bottom icon view
+    + look at the large context image
+    + pick a chip from the list on the right
 - hit apply once all chips have been matched
-- close the error window
+- close the error window (ignore the frozen importlib warnings)
 - images will be embedded, and annotations drawn
 
 See [[file:usage.org][usage]]
@@ -81,7 +84,7 @@ Smaller image ratios:
 
 ** palette and colors
 
-Palettes set the colors of the annotation surround, connectors, chip location recangle, and layer highlight color. 
+Palettes set the colors of the annotation surround, connectors, chip location rectangle, and layer highlight color. 
 
 There are a few built-in color palettes. They are specified with 'palette' key, and can be:
 - =default= :: SVG named colors excluding light/dark/medium, and colors I found undesirable (whites, blacks, greys, brows, beiges).
@@ -113,18 +116,14 @@ colors:
 
 * TODO Things to be done, probably
 ** GUI stuff
-- can the combo box display everything? not without a custom cell renderer, or moving away from TreeView
-- This UI ended up being pretty bad, but it does the job
-    + Currently you scroll a lot, and have to click twice to open the selection drop down.
-    + After using it, I think:
-        * The UI should be a small match list area, and a large matching area.
-        * The match list area indicates match status, and lets the user easily access any match
-        * The match area displays one photo and selection list.
-        * The user selects, then has keyboard+gui controls to move forward, and backward.
+- New GUI issues
+    + Buttons don't animate
+    + add an unselect button?
 
 ** Testing and edge cases
 - test with bad file paths
 - test with empty name, description, photo etc.
+- what if chip names are duplicate?
 - what happens if the gutter fills up?
 - what happens if both gutters fills up?
 - what happens with rects in the gutter?
@@ -132,13 +131,15 @@ colors:
     + outside the page?
     + straddling the page border?
 - Lots of missing input verification when accessing the yaml config
+- Newer inkscapes
+- Windows, Mac
 
 ** Bugs
 - Undo doesn't restore the selection. I think it was working previously.
 - Connectors can pass through empty parts of the gutter
     + I could fill empty gutter space with rects that set 'connector-avoid', but that doesn't help with the current left to right gutter fill, and it makes extra work if the user wants to modify the arrangement.
 
-** Enhancments
+** Enhancements
 - Gutter filling is overly simple
     + Currently we fill left to right, and try to keep gutters evenly filled
     + My better idea:
@@ -153,11 +154,11 @@ colors:
 - Allow non-rect shapes (for annotating areas and functional blocks)
 - Connectors could be optional (just outline the chip and annotation)
 - Write back matches to the yaml file? 
-    + would make it much easier to iterate if the matchset hasn't changed
+    + would make it much easier to iterate if the match set hasn't changed
     + would need a checkbox to save matches
     + an option somewhere to erase matches
     + extra checks to ensure matching rectangles still exist
-- Some way to indicate the annotated chip is on the reverse side of the board (for when it's not worth annotating both sides)
+- dashed rects indicate reverse, but it looks bad
 - Resize embedded images to match DPI. 
     + Could be worth automating to reduce output SVG size.
     + Edit > Make a Bitmap Copy
@@ -165,8 +166,7 @@ colors:
     + Then grab the original and delete it
 - A layout more suited for text only (no zoomed chip photos)
 - Avoid colors close to the circuit board color
-    + probably average the gdkpixbuf colors, and skip colors close to it
-- should probably inset the image inside the border
+    + probably average the GdkPixbuf colors, and skip colors close to it
 - maybe allow groups in the selection but filter them for processing
     + does selecting a group automatically include its children?
 - non-embedded photos

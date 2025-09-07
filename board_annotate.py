@@ -1006,7 +1006,7 @@ def chip_context_image(rect: inkex.Rectangle,
     scale_factor = (render_width/svg_width + render_height/svg_height)/2
 
     # Rectangle dimensions
-    size = 400
+    size = 360
     rect_bb = rect.bounding_box()
     context_x = max(0, rect_bb.center_x * scale_factor - ((size)/2))
     context_y = max(0, rect_bb.center_y * scale_factor - ((size)/2))

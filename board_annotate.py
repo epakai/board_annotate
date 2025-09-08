@@ -19,6 +19,7 @@
 # Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 import os
+import sys
 import copy
 import base64
 import math
@@ -29,8 +30,17 @@ from typing import (Generator, Self, List, Tuple, Optional, Dict, Any)
 import argparse
 import yaml
 import inkex
-import inkex.gui
-from gi.repository import Gtk, GdkPixbuf, Gio, GLib, GObject, Gdk
+
+from contextlib import redirect_stderr
+import io
+with redirect_stderr(io.StringIO()) as h:
+    import inkex.gui
+    from gi.repository import Gtk, GdkPixbuf, Gio, GLib, GObject, Gdk
+    # Sort out ImportWarning messages, keep all others and send them to stderr
+    for msg in (val for val in h.getvalue().splitlines(keepends=True)
+                if val and
+                ("ImportWarning: DynamicImporter.exec_module()" in val)):
+        sys.stderr.write(msg)
 
 # Globals
 INKSCAPE_SVG: inkex.SvgDocumentElement = None

@@ -32,7 +32,6 @@ import inkex
 import inkex.gui
 from gi.repository import Gtk, GdkPixbuf, Gio, GLib, GObject, Gdk
 
-
 # Globals
 INKSCAPE_SVG: inkex.SvgDocumentElement = None
 YAML_FILE: str = ''
@@ -194,11 +193,11 @@ class SelectionWindow(inkex.gui.Window):
 
         # User selected rectangles to be matched with a chip
         selection_items = self.widget('selection_items')
+        # Render once for all icon images
+        svg_render = svg_without_selections_as_pixbuf(
+            INKSCAPE_SVG, self.gapp.kwargs['selection'])
         for rect in self.gapp.kwargs['selection']:
-            svg_render = svg_without_selections_as_pixbuf(
-                INKSCAPE_SVG, self.gapp.kwargs['selection'])
             icon_image = rect_icon_image(rect, svg_render)
-
             context_image = chip_context_image(
                 rect, self.gapp.kwargs['selection'])
             selection_items.append([context_image, icon_image, rect.get("id"),
@@ -1059,6 +1058,7 @@ def svg_without_selections_as_pixbuf(
     with keep_rect visible as a red unfilled rectangle,
     and all other selections removed"""
     # copy SVG, remove selections, except keep_rect
+    # TODO depending on the embedded images size this can be expensive
     temp_svg = copy.deepcopy(svg)
     for rect in selections:
         if rect is keep_rect:

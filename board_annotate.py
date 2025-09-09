@@ -19,28 +19,33 @@
 # Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
 
 import os
+import io
 import sys
 import copy
 import base64
 import math
 import random
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import (Generator, Self, List, Tuple, Optional, Dict, Any)
-
+from contextlib import redirect_stderr
 import argparse
 import yaml
+import gi
 import inkex
 
-from contextlib import redirect_stderr
-import io
+# https://gitlab.com/inkscape/extras/extension-manager/-/issues/24#note_1080113589
 with redirect_stderr(io.StringIO()) as h:
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('Rsvg', '2.0')
     import inkex.gui
     from gi.repository import Gtk, GdkPixbuf, Gio, GLib, GObject, Gdk
-    # Sort out ImportWarning messages, keep all others and send them to stderr
-    for msg in (val for val in h.getvalue().splitlines(keepends=True)
-                if val and
-                ("ImportWarning: DynamicImporter.exec_module()" in val)):
-        sys.stderr.write(msg)
+
+# Sort out ImportWarning messages, keep all others and send them to stderr
+for msg in (val for val in h.getvalue().splitlines(keepends=True)
+            if val and
+            ("ImportWarning: DynamicImporter.exec_module()" not in val)):
+    sys.stderr.write(msg)
+
 
 # Globals
 INKSCAPE_SVG: inkex.SvgDocumentElement = None
@@ -138,6 +143,7 @@ class ChipItem(GObject.Object):
                               GdkPixbuf.Pixbuf.new_from_file_at_size(
                                   self.image_path, 256, 256))
 
+        self.icon_image = None
         if self.tooltip_image is not None:
             icon_width = self.tooltip_image.get_width() / 8
             icon_height = self.tooltip_image.get_height() / 8
@@ -167,7 +173,7 @@ class ChipItem(GObject.Object):
                          tooltip_y: int, keyboard_mode: bool,
                          tooltip: Gtk.Tooltip) -> bool:
         '''Set image tooltip to larger image'''
-        # pylint: disable=unused-argument
+        # pylint: disable=unused-argument,too-many-arguments
         tooltip.set_icon(self.tooltip_image)
         return True
 
@@ -175,6 +181,17 @@ class ChipItem(GObject.Object):
     def as_widget(cls, chipitem: Self) -> Gtk.Widget:
         '''Return associated widget for bind_model use'''
         return chipitem.widget
+
+
+class Column(IntEnum):
+    '''Associate selection_item ListStore columns with names'''
+    CONTEXT_IMG = 0
+    RECT_ICON = 1
+    DISPLAY_ICON = 2
+    RECT_NAME = 3
+    CHIP_SELECT = 4
+    DISPLAY_NAME = 5
+    ON_REVERSE = 6
 
 
 class SelectionWindow(inkex.gui.Window):
@@ -186,8 +203,27 @@ class SelectionWindow(inkex.gui.Window):
                  **kwargs: List[List[str]]):
         super().__init__(widget, *args, **kwargs)
 
-        # Chips defined in user provide yaml
+        selection_items = self.widget('selection_items')
+        self.setup_chip_items()
+        self.setup_selections_and_icon_view()
+        self.setup_accelerators()
+        self.populate_status_bar(selection_items)
+
+        # misc signal connections
+        self.widget('chip_reverse').connect('toggled', self.update_reverse)
+        self.widget('close_button').connect('clicked', self.on_close_clicked)
+        self.widget('apply_button').connect('clicked', self.on_apply_clicked,
+                                            selection_items, self.chip_items)
+        self.widget('unselect_chip').connect('clicked',
+                                             self.unselect_chip_list_box)
+
+        self.window.show_all()
+        self.window.connect("destroy", Gtk.main_quit)
+
+    def setup_chip_items(self) -> None:
+        '''a Gio.ListStore backing the chip selection ListBox'''
         self.chip_items = Gio.ListStore.new(ChipItem)
+        # Chips defined in user provided yaml
         for chip in YAML_CONFIG['chips']:
             builder = Gtk.Builder()
             builder.add_from_file(self.gapp.get_ui_file(self.name))
@@ -198,30 +234,45 @@ class SelectionWindow(inkex.gui.Window):
         chip_list_box = self.widget('chip_list_box')
         chip_list_box.bind_model(self.chip_items, ChipItem.as_widget)
         chip_list_box.connect('row-activated', self.update_match)
+        chip_list_box.connect('selected-rows-changed',
+                              self.check_unselect_match)
 
-        self.widget('chip_reverse').connect('toggled', self.update_reverse)
-
+    def setup_selections_and_icon_view(self) -> None:
+        '''Gtk.ListStore backing a the Selections IconView'''
         # User selected rectangles to be matched with a chip
         selection_items = self.widget('selection_items')
-        # Render once for all icon images
+
+        # render the svg for creating icon subpixbufs
         svg_render = svg_without_selections_as_pixbuf(
             INKSCAPE_SVG, self.gapp.kwargs['selection'])
+        # prepare a copy of the SVG for rendering context images
+        svg_hidden_selections = copy.deepcopy(INKSCAPE_SVG)
+        for rect in self.gapp.kwargs['selection']:
+            new_rect = svg_hidden_selections.getElementById(rect.get("id"))
+            new_rect.style['fill'] = 'none'
+            new_rect.style['stroke'] = 'none'
+        # render each icon and context image and store them
+        # in the selection_item ListStore
         for rect in self.gapp.kwargs['selection']:
             icon_image = rect_icon_image(rect, svg_render)
-            context_image = chip_context_image(
-                rect, self.gapp.kwargs['selection'])
-            selection_items.append([context_image, icon_image, rect.get("id"),
-                                    "", False, icon_image.copy()])
+            context_image = chip_context_image(rect, svg_hidden_selections)
+            selection_items.append(
+                # See selection_columns in ui file or Column(IntEnum)
+                [context_image, icon_image, icon_image.copy(),
+                 rect.get("id"), "", rect.get("id"), False])
 
         self.selections_icon_view = self.widget('selections_icon_view')
-        self.selections_icon_view.set_pixbuf_column(5)
-        self.selections_icon_view.set_text_column(2)
+        self.selections_icon_view.set_pixbuf_column(Column.DISPLAY_ICON)
+        self.selections_icon_view.set_text_column(Column.DISPLAY_NAME)
+        self.selections_icon_view.set_tooltip_column(Column.RECT_NAME)
         self.selections_icon_view.set_item_width(64)
-        self.selections_icon_view.connect('selection-changed',
-                                          self.update_selection)
+        self.selections_icon_view.connect(
+            'selection-changed', self.update_selection, selection_items)
         self.selections_icon_view.select_path(
             selection_items.get_path(selection_items.get_iter_first()))
 
+    def setup_accelerators(self) -> None:
+        '''Window keyboard shortcuts'''
         accel_group = Gtk.AccelGroup()
         self.window.add_accel_group(accel_group)
         for accel in ['k', '<Shift>k']:
@@ -235,68 +286,112 @@ class SelectionWindow(inkex.gui.Window):
         self.widget('next_match_button').connect(
             'clicked', self.next_selection)
 
-        self.widget('close_button').connect('clicked', self.on_close_clicked)
-        self.widget('apply_button').connect('clicked', self.on_apply_clicked,
-                                            selection_items, self.chip_items)
-        self.populate_status_bar(selection_items)
-
-        self.window.show_all()
-        self.window.connect("destroy", Gtk.main_quit)
+    def unselect_chip_list_box(self, button: Gtk.Button) -> None:
+        '''Unselect a chip match, (for unselect_chip button)'''
+        # pylint: disable=unused-argument
+        chip_list_box = self.widget('chip_list_box')
+        chip_list_box.unselect_all()
 
     def prev_selection(self, accel: Gtk.AccelGroup = None,
                        key: Optional[int] = None,
                        mods: Gdk.ModifierType = None,
                        accel_flags: Gtk.AccelFlags = None) -> None:
-        '''Move selections_icon_view selection back, and update display'''
+        '''Move selections_icon_view selection back'''
         # pylint: disable=unused-argument
-        path = self.selections_icon_view.get_selected_items()
-        model = self.selections_icon_view.get_model()
-        icon_view_iter = model.get_iter(path)
-        icon_view_iter = model.iter_previous(icon_view_iter)
-        if icon_view_iter is None:
-            # loop to the end of the list
-            icon_view_iter = model.get_iter_first()
-            while model.iter_next(icon_view_iter):
-                icon_view_iter = model.iter_next(icon_view_iter)
-
-            self.selections_icon_view.select_path(
-                model.get_path(icon_view_iter))
-            self.selections_icon_view.set_cursor(
-                model.get_path(icon_view_iter), None, False)
-        else:
-            self.selections_icon_view.select_path(
-                model.get_path(icon_view_iter))
-            self.selections_icon_view.set_cursor(
-                model.get_path(icon_view_iter), None, False)
+        self.change_selection(previous=True)
 
     def next_selection(self, accel: Gtk.AccelGroup = None,
                        key: Optional[int] = None,
                        mods: Gdk.ModifierType = None,
                        accel_flags: Gtk.AccelFlags = None) -> None:
-        '''Move selections_icon_view selection forward, and update display'''
+        '''Move selections_icon_view selection forward'''
         # pylint: disable=unused-argument
-        path = self.selections_icon_view.get_selected_items()
-        model = self.selections_icon_view.get_model()
-        icon_view_iter = model.get_iter(path)
-        icon_view_iter = model.iter_next(icon_view_iter)
-        if icon_view_iter is None:
-            self.selections_icon_view.select_path(model.get_path(
-                model.get_iter_first()))
-            self.selections_icon_view.set_cursor(model.get_path(
-                model.get_iter_first()), None, False)
-        else:
-            self.selections_icon_view.select_path(
-                model.get_path(icon_view_iter))
-            self.selections_icon_view.set_cursor(
-                model.get_path(icon_view_iter), None, False)
+        self.change_selection(previous=False)
+
+    def change_selection(self, previous: bool) -> None:
+        '''Move selections_icon_view selection, and update display'''
+        icon_view = self.selections_icon_view
+        selection_items = icon_view.get_model()
+        icon_view_iter = selection_items.get_iter(
+            icon_view.get_selected_items())
+        icon_view_iter = (selection_items.iter_previous(icon_view_iter)
+                          if previous
+                          else selection_items.iter_next(icon_view_iter))
+
+        if icon_view_iter is None and previous:
+            icon_view_iter = selection_items[-1].iter
+        elif icon_view_iter is None and not previous:
+            icon_view_iter = selection_items.get_iter_first()
+
+        icon_view.select_path(selection_items.get_path(icon_view_iter))
+        # scroll the selection into view
+        icon_view.set_cursor(selection_items.get_path(icon_view_iter),
+                             None, False)
 
     def update_reverse(self, checkbox: Gtk.CheckButton) -> None:
         '''Update selection when 'On Reverse' checkbox is toggled'''
         selection_model = self.selections_icon_view.get_model()
         selection_path = self.selections_icon_view.get_selected_items()
-        selection_model.set_value(
-            selection_model.get_iter(selection_path), 4,
-            checkbox.get_active())
+        if selection_path:
+            selection_model.set_value(
+                selection_model.get_iter(selection_path), Column.ON_REVERSE,
+                checkbox.get_active())
+            self.update_iconview_icon(selection_model, selection_path)
+
+    def check_unselect_match(self, box: Gtk.ListBox = None) -> None:
+        ''' Update selection when a match is unselected'''
+        # pylint: disable=unused-argument
+        selection_items = self.selections_icon_view.get_model()
+        path = self.selections_icon_view.get_selected_items()
+        if box.get_selected_row() is None and path:
+            selection_items.set_value(selection_items.get_iter(path),
+                                      Column.CHIP_SELECT, "")
+        self.update_match(box)
+
+    def update_iconview_icon(self, selection_items: Gtk.ListStore,
+                             path: Gtk.TreePath) -> None:
+        '''Update the iconview icon for various states'''
+        # NOTE: scaling causes the new pixbuf to be too small to
+        # hold full size icons so we always recopy from the original
+
+        if (selection_items[path][Column.CHIP_SELECT] == "" and not
+                selection_items[path][Column.ON_REVERSE]):
+            # normal: unmatched, no reverse
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                selection_items[path][Column.RECT_ICON].copy())
+        if (selection_items[path][Column.CHIP_SELECT] == "" and
+                selection_items[path][Column.ON_REVERSE]):
+            # shrunk: unmatched, reverse
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                selection_items[path][Column.RECT_ICON].copy())
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                selection_items[path][Column.RECT_ICON].scale_simple(
+                    48, 48, GdkPixbuf.InterpType.BILINEAR))
+        if (selection_items[path][Column.CHIP_SELECT] != "" and not
+                selection_items[path][Column.ON_REVERSE]):
+            # saturate: matched, no reverse
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                selection_items[path][Column.RECT_ICON].copy())
+            (selection_items[path][Column.RECT_ICON].
+             saturate_and_pixelate(selection_items[path][Column.DISPLAY_ICON],
+                                   0.5, True))
+        if (selection_items[path][Column.CHIP_SELECT] != "" and
+                selection_items[path][Column.ON_REVERSE]):
+            # shrunk+saturate: matched, reverse
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                selection_items[path][Column.RECT_ICON].copy())
+            (selection_items[path][Column.RECT_ICON].
+             saturate_and_pixelate(
+                 selection_items[path][Column.DISPLAY_ICON], 0.5, True))
+            selection_items.set_value(
+                selection_items.get_iter(path), Column.DISPLAY_ICON,
+                (selection_items[path][Column.DISPLAY_ICON].
+                 scale_simple(48, 48, GdkPixbuf.InterpType.BILINEAR)))
 
     def update_match(self, box: Gtk.ListBox = None,
                      row: Gtk.ListBoxRow = None,
@@ -304,22 +399,37 @@ class SelectionWindow(inkex.gui.Window):
         ''' Update selection when match info has changed '''
         # pylint: disable=unused-argument
         selection_items = self.selections_icon_view.get_model()
-        selection_path = self.selections_icon_view.get_selected_items()
-        if box:
-            selected_chip_row = box.get_selected_row()
+        path = self.selections_icon_view.get_selected_items()
+
+        if not path:
+            self.widget('selection_label').set_text("")
+        else:
+            selected_chip_row = box.get_selected_row() if box else None
             if selected_chip_row:
                 selected_chip_index = selected_chip_row.get_index()
                 selection_items.set_value(
-                    selection_items.get_iter(selection_path), 3,
+                    selection_items.get_iter(path), Column.CHIP_SELECT,
                     self.chip_items[selected_chip_index].name)
 
-        selection_items[selection_path][1].saturate_and_pixelate(
-            selection_items[selection_path][5], 0.5, True)
+            self.update_iconview_icon(selection_items, path)
 
-        self.widget('selection_label').set_text(
-                selection_items[selection_path][2] +
-                (" [" + selection_items[selection_path][3] + "]"
-                 if selection_items[selection_path][3] else ""))
+            if selection_items[path][Column.CHIP_SELECT] != "":
+                # update display name
+                selection_items.set_value(
+                    selection_items.get_iter(path), Column.DISPLAY_NAME,
+                    "[" + selection_items[path][Column.CHIP_SELECT] + "]")
+                # update context image display label
+                self.widget('selection_label').set_text(
+                    selection_items[path][Column.RECT_NAME] +
+                    " [" + selection_items[path][Column.CHIP_SELECT] + "]")
+            else:
+                # reset icon name to rect name
+                selection_items.set_value(
+                    selection_items.get_iter(path), Column.DISPLAY_NAME,
+                    selection_items[path][Column.RECT_NAME])
+                # update context image display label
+                self.widget('selection_label').set_text(
+                    selection_items[path][Column.RECT_NAME])
 
         apply_button = self.widget('apply_button')
         if self.populate_status_bar(selection_items) == 0:
@@ -332,7 +442,7 @@ class SelectionWindow(inkex.gui.Window):
         item_iter = selection_items.get_iter_first()
         item_remaining_count: int = selection_items.iter_n_children()
         while item_iter:
-            if selection_items.get_value(item_iter, 3) != "":
+            if selection_items.get_value(item_iter, Column.CHIP_SELECT) != "":
                 item_remaining_count -= 1
             item_iter = selection_items.iter_next(item_iter)
 
@@ -346,20 +456,25 @@ class SelectionWindow(inkex.gui.Window):
 
         return item_remaining_count
 
-    def update_selection(self, view: Gtk.IconView) -> None:
+    def update_selection(self, view: Gtk.IconView,
+                         selection_items: Gtk.ListStore) -> None:
         ''' Update the view when a selection as changed '''
-        selection_items = self.widget('selection_items')
         path = view.get_selected_items()
-        if path:
+        if not path:
+            self.widget('selection_label').set_text("")
+            self.widget('selection_context_image').clear()
+            self.widget('chip_reverse').set_active(False)
+            self.widget('chip_list_box').unselect_all()
+        else:
             self.widget('selection_context_image').set_from_pixbuf(
-                selection_items[path][0])
+                selection_items[path][Column.CONTEXT_IMG])
             self.widget('selection_label').set_text(
-                selection_items[path][2] +
-                (" [" + selection_items[path][3] + "]"
-                 if selection_items[path][3] else ""))
+                selection_items[path][Column.RECT_NAME] +
+                (" [" + selection_items[path][Column.CHIP_SELECT] + "]"
+                 if selection_items[path][Column.CHIP_SELECT] else ""))
             self.widget('chip_reverse').set_active(
-                selection_items[path][4])
-            match = selection_items[path][3]
+                selection_items[path][Column.ON_REVERSE])
+            match = selection_items[path][Column.CHIP_SELECT]
             if match:
                 chip_index = 0
                 while self.chip_items.get_item(chip_index).name != match:
@@ -392,17 +507,18 @@ class SelectionApp(inkex.gui.GtkApp):
     windows = [SelectionWindow]
 
 
+class Position(Enum):
+    """Possible positions for a gutter"""
+    ABOVE = 1
+    BELOW = 2
+    LEFT = 3
+    RIGHT = 4
+
+
 class Gutter:
     """Gutter for positioning annotations"""
     index = 0
     offset = 0.0
-
-    class Position(Enum):
-        """Possible positions for a gutter"""
-        ABOVE = 1
-        BELOW = 2
-        LEFT = 3
-        RIGHT = 4
 
     def __init__(self, position: Position,
                  board_image: inkex.Image) -> None:
@@ -412,30 +528,24 @@ class Gutter:
                             if 'image_ratio' in YAML_CONFIG
                             else 0.6)
         match position:
-            case self.Position.ABOVE:
+            case Position.ABOVE:
                 self.gutter_size = board_image.top
-            case self.Position.BELOW:
-                self.gutter_size = (INKSCAPE_SVG.viewbox_height -
-                                    board_image.bottom)
-            case self.Position.LEFT:
+                self.main_image_edge = board_image.top
+            case Position.BELOW:
+                self.gutter_size = (
+                    INKSCAPE_SVG.viewbox_height - board_image.bottom)
+                self.main_image_edge = board_image.bottom
+            case Position.LEFT:
                 self.gutter_size = board_image.left
-            case self.Position.RIGHT:
-                self.gutter_size = (INKSCAPE_SVG.viewbox_width -
-                                    board_image.right)
+                self.main_image_edge = board_image.left
+            case Position.RIGHT:
+                self.gutter_size = (
+                    INKSCAPE_SVG.viewbox_width - board_image.right)
+                self.main_image_edge = board_image.right
 
         stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         self.image_display_size = (self.gutter_size * self.image_ratio -
                                    stroke_width)
-
-        match position:
-            case self.Position.ABOVE:
-                self.main_image_edge = board_image.top
-            case self.Position.BELOW:
-                self.main_image_edge = board_image.bottom
-            case self.Position.LEFT:
-                self.main_image_edge = board_image.left
-            case self.Position.RIGHT:
-                self.main_image_edge = board_image.right
 
     def get_approximate_corners(self) -> Tuple[List[float], List[float]]:
         """
@@ -445,11 +555,11 @@ class Gutter:
         (based on a square image)
         """
         match self.position:
-            case self.Position.ABOVE | self.Position.BELOW:
+            case Position.ABOVE | Position.BELOW:
                 return ([self.offset, self.main_image_edge],
                         [self.offset + self.image_display_size,
                          self.main_image_edge])
-            case self.Position.LEFT | self.Position.RIGHT:
+            case Position.LEFT | Position.RIGHT:
                 return ([self.main_image_edge, self.offset],
                         [self.main_image_edge,
                          self.offset + self.image_display_size])
@@ -459,33 +569,32 @@ class Gutter:
         """return tuple of x, y, width, height
         where the annotation surround should be placed"""
         # Work around annotations without images
-        if width == 0:
+        if width == 0 or height == 0:
             width = self.image_display_size
-        if height == 0:
             height = self.image_display_size
 
         stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
-            case self.Position.ABOVE:
+            case Position.ABOVE:
                 return (
                     self.offset + (0.5 * stroke_width),
                     0 + (0.5 * stroke_width),
                     (self.image_display_size * (width/height) + stroke_width),
                     self.main_image_edge - stroke_width)
-            case self.Position.BELOW:
+            case Position.BELOW:
                 return (
                     self.offset + (0.5 * stroke_width),
                     self.main_image_edge + (0.5 * stroke_width),
                     (self.image_display_size * (width/height) + stroke_width),
                     (INKSCAPE_SVG.viewbox_height -
                      self.main_image_edge - stroke_width))
-            case self.Position.LEFT:
+            case Position.LEFT:
                 return (
                     0 + (0.5 * stroke_width),
                     self.offset + (0.5 * stroke_width),
                     self.main_image_edge - stroke_width,
                     (self.image_display_size * (height/width) + stroke_width))
-            case  self.Position.RIGHT:
+            case  Position.RIGHT:
                 return (
                     self.main_image_edge + (0.5 * stroke_width),
                     self.offset + (0.5 * stroke_width),
@@ -499,41 +608,90 @@ class Gutter:
         where the image should be placed"""
         stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
-            case self.Position.ABOVE:
+            case Position.ABOVE:
                 return (
                     self.offset + stroke_width,
                     (self.main_image_edge -
                      self.image_display_size - stroke_width),
                     self.image_display_size * (width / height),
                     self.image_display_size)
-            case self.Position.BELOW:
+            case Position.BELOW:
                 return (
                     self.offset + stroke_width,
                     self.main_image_edge + stroke_width,
                     self.image_display_size * (width / height),
                     self.image_display_size)
-            case self.Position.LEFT:
+            case Position.LEFT:
                 return (
                     (self.main_image_edge -
                      self.image_display_size - stroke_width),
                     self.offset + stroke_width,
                     self.image_display_size,
                     self.image_display_size * (height / width))
-            case self.Position.RIGHT:
+            case Position.RIGHT:
                 return (
                     self.main_image_edge + stroke_width,
                     self.offset + stroke_width,
                     self.image_display_size,
                     self.image_display_size * (height / width))
 
+    def get_text_position_size(self, width: int, height: int, second: bool
+                               ) -> Tuple[float, float, float, float]:
+        """return tuple of x, y, width, height
+        where the title should be placed"""
+        # Work around annotations without images
+        if width == 0 or height == 0:
+            width = self.image_display_size
+            height = self.image_display_size
+
+        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
+        width_scaled_image_size = self.image_display_size * (width / height)
+        height_scaled_image_size = self.image_display_size * (height / width)
+        edge_stroke_image_offset = (self.main_image_edge + stroke_width +
+                                    self.image_display_size)
+        above_height = 0.5 * (self.main_image_edge - self.image_display_size -
+                              (2 * stroke_width))
+        below_height = 0.5 * ((INKSCAPE_SVG.viewbox_height - stroke_width -
+                               edge_stroke_image_offset))
+        vertical_height = 0.5 * height_scaled_image_size
+        match self.position:
+            case Position.ABOVE:
+                return (
+                    self.offset + stroke_width,
+                    stroke_width + (above_height if second else 0),
+                    width_scaled_image_size,
+                    above_height)
+            case Position.BELOW:
+                return (
+                    self.offset + stroke_width,
+                    edge_stroke_image_offset + (below_height if second else 0),
+                    width_scaled_image_size,
+                    below_height)
+            case Position.LEFT:
+                return (
+                    stroke_width,
+                    (self.offset + stroke_width +
+                     (vertical_height if second else 0)),
+                    (self.main_image_edge - self.image_display_size -
+                     stroke_width),
+                    vertical_height)
+            case Position.RIGHT:
+                return (
+                    edge_stroke_image_offset,
+                    (self.offset + stroke_width +
+                     (vertical_height if second else 0)),
+                    (INKSCAPE_SVG.viewbox_width - stroke_width -
+                     edge_stroke_image_offset),
+                    vertical_height)
+
     def increment(self, width: float, height: float) -> None:
         """set up for placing the next annotation"""
         self.index += 1
         stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
         match self.position:
-            case self.Position.ABOVE | self.Position.BELOW:
+            case Position.ABOVE | Position.BELOW:
                 self.offset += width + stroke_width
-            case self.Position.LEFT | self.Position.RIGHT:
+            case Position.LEFT | Position.RIGHT:
                 self.offset += height + stroke_width
 
 
@@ -545,20 +703,20 @@ class Annotation(inkex.Layer):
         self.rectangle = rectangle
         self.name = name
         self.description = description
-        self.image_path = image_path
-        self.gdkpixbuf = gdkpixbuf
         self.color = inkex.Color(color)
         self.reverse = reverse
-
-        self.gutter: Optional[Gutter] = None  # set in draw
-        self.svg_image: inkex.Image = None  # set in draw_image
-        self.surround: inkex.Rectangle = None  # set in draw_surround
+        self.gdkpixbuf = gdkpixbuf
+        self.image_path = image_path
 
         if self.gdkpixbuf is not None:
             self.image_width = gdkpixbuf.get_width()
             self.image_height = gdkpixbuf.get_height()
         else:
             self.image_width, self.image_height = 0.0, 0.0
+
+        self.gutter: Optional[Gutter] = None  # set in draw
+        self.svg_image: inkex.Image = None  # set in draw_image
+        self.surround: inkex.Rectangle = None  # set in draw_surround
 
         super().__init__()
 
@@ -579,6 +737,9 @@ class Annotation(inkex.Layer):
         """Draw the annotation"""
         # save gutter in case a duplicate needs it
         self.gutter = gutter
+        if self.gutter is None:
+            raise AssertionError(
+                "Tried to draw without any gutter to draw it in")
 
         INKSCAPE_SVG.add(self)  # Add the Annotation layer
 
@@ -594,7 +755,9 @@ class Annotation(inkex.Layer):
 
     def draw_image(self) -> None:
         """embed and place the annotation image in the original svg"""
-        assert self.gutter is not None
+        if self.gutter is None:
+            raise AssertionError(
+                "Tried to draw_image without any gutter to draw it in")
         if self.image_path and self.gdkpixbuf:
             position_size = self.gutter.get_image_position_size(
                 self.image_width, self.image_height)
@@ -602,12 +765,15 @@ class Annotation(inkex.Layer):
             # After that you can remove BoardAnnotateImage and get_image_type
             self.svg_image = BoardAnnotateImage.new(*position_size)
             self.svg_image.embed_image(self.image_path)
+            self.svg_image.set("inkscape:connector-avoid", 'true')
             self.add(self.svg_image)
             self.svg_image.label = "chip image"
 
     def draw_surround(self) -> None:
         """draw the annotation surrounding rectangle"""
-        assert self.gutter is not None
+        if self.gutter is None:
+            raise AssertionError(
+                "Tried to draw_image without any gutter to draw it in")
         position_size = self.gutter.get_position_size(
             self.image_width, self.image_height)
         stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
@@ -627,46 +793,13 @@ class Annotation(inkex.Layer):
         # TODO try to fit title_box to the title, then give rest to desc_box
         # TODO better fonts
         # TODO better way to set font size based on box dimension
-        assert self.gutter is not None
-        surround_bb = self.surround.bounding_box()
-        title_box = None
-        text_ratio = 1 - self.gutter.image_ratio
-        stroke_width = INKSCAPE_SVG.viewport_to_unit("1mm")
-        half_stroke_width = 0.5 * stroke_width
-        above_half_height = 0.5 * (self.svg_image.top -
-                                   (surround_bb.top +
-                                    half_stroke_width))
-        below_half_height = 0.5 * ((surround_bb.bottom -
-                                    half_stroke_width) -
-                                   self.svg_image.bottom)
-        vertical_half_height = 0.5 * (surround_bb.height - stroke_width)
+        if self.gutter is None:
+            raise AssertionError(
+                "Tried to draw_text without any gutter to draw it in")
 
-        title_box = None
-        match self.gutter.position:
-            case Gutter.Position.ABOVE:
-                title_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    surround_bb.top + half_stroke_width,
-                    surround_bb.width - stroke_width,
-                    above_half_height)
-            case Gutter.Position.BELOW:
-                title_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    self.svg_image.bottom,
-                    surround_bb.width - stroke_width,
-                    below_half_height)
-            case Gutter.Position.LEFT:
-                title_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    surround_bb.top + half_stroke_width,
-                    surround_bb.width * text_ratio - half_stroke_width,
-                    vertical_half_height)
-            case Gutter.Position.RIGHT:
-                title_box = inkex.Rectangle.new(
-                    self.svg_image.right,
-                    surround_bb.top + half_stroke_width,
-                    surround_bb.width * text_ratio - half_stroke_width,
-                    vertical_half_height)
+        title_box_position_size = self.gutter.get_text_position_size(
+            self.image_width, self.image_height, second=False)
+        title_box = inkex.Rectangle.new(*title_box_position_size)
 
         title_box.style.set_color(inkex.Color('none'), 'stroke')
         title_box.style.set_color(inkex.Color('none'), 'fill')
@@ -681,36 +814,9 @@ class Annotation(inkex.Layer):
         self.add(title)
         title.label = "title text"
 
-        desc_box = None
-        match self.gutter.position:
-            case Gutter.Position.ABOVE:
-                desc_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    (surround_bb.top + above_half_height +
-                     half_stroke_width),
-                    surround_bb.width - stroke_width,
-                    above_half_height)
-            case Gutter.Position.BELOW:
-                desc_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    (surround_bb.bottom - below_half_height -
-                     half_stroke_width),
-                    surround_bb.width - stroke_width,
-                    below_half_height)
-            case Gutter.Position.LEFT:
-                desc_box = inkex.Rectangle.new(
-                    surround_bb.left + half_stroke_width,
-                    (surround_bb.top + vertical_half_height +
-                     half_stroke_width),
-                    surround_bb.width * text_ratio - half_stroke_width,
-                    vertical_half_height)
-            case Gutter.Position.RIGHT:
-                desc_box = inkex.Rectangle.new(
-                    surround_bb.right - (surround_bb.width * text_ratio),
-                    (surround_bb.top + vertical_half_height +
-                     half_stroke_width),
-                    surround_bb.width * text_ratio - half_stroke_width,
-                    vertical_half_height)
+        desc_box_position_size = self.gutter.get_text_position_size(
+            self.image_width, self.image_height, second=True)
+        desc_box = inkex.Rectangle.new(*desc_box_position_size)
 
         desc_box.style.set_color(inkex.Color('none'), 'stroke')
         desc_box.style.set_color(inkex.Color('none'), 'fill')
@@ -721,7 +827,6 @@ class Annotation(inkex.Layer):
         desc.text = self.description
         desc.style['font-size'] = INKSCAPE_SVG.viewport_to_unit("8pt")
         desc.style['text-anchor'] = "start"
-        desc.style['line-height'] = "1"
         desc.style['shape-inside'] = desc_box.get_id(as_url=2)
         self.add(desc)
         desc.label = "description text"
@@ -731,6 +836,9 @@ class Annotation(inkex.Layer):
         path = inkex.PathElement()
         path.style['stroke-width'] = INKSCAPE_SVG.viewport_to_unit("1mm")
         path.style.set_color(self.color, 'stroke')
+        if self.reverse:
+            path.style['stroke-dasharray'] = '2,1'
+            path.style['stroke-dashoffset'] = 0
         # Make it a connector
         path.set("inkscape:connector-type", "polyline")
         path.set("inkscape:connector-curvature", 0)
@@ -770,11 +878,11 @@ def annotate_board(selection_items: Gtk.ListStore,
     board_image = find_board_image()
     gutter_a, gutter_b = None, None
     if YAML_CONFIG['gutter'] == 'horizontal':
-        gutter_a = Gutter(Gutter.Position.ABOVE, board_image)
-        gutter_b = Gutter(Gutter.Position.BELOW, board_image)
+        gutter_a = Gutter(Position.ABOVE, board_image)
+        gutter_b = Gutter(Position.BELOW, board_image)
     elif YAML_CONFIG['gutter'] == 'vertical':
-        gutter_a = Gutter(Gutter.Position.LEFT, board_image)
-        gutter_b = Gutter(Gutter.Position.RIGHT, board_image)
+        gutter_a = Gutter(Position.LEFT, board_image)
+        gutter_b = Gutter(Position.RIGHT, board_image)
     else:
         raise ValueError("Bad 'gutter' type in YAML config")
 
@@ -787,24 +895,28 @@ def annotate_board(selection_items: Gtk.ListStore,
         chip_index = 0
         while chip_items.get_item(chip_index) is not None:
             chip_item = chip_items.get_item(chip_index)
-            if (chip_item.name == selection_items.get_value(selection.iter,
-                                                            3)):
+            if (chip_item.name ==
+                    selection_items.get_value(selection.iter,
+                                              Column.CHIP_SELECT)):
                 annotation = Annotation(
                     rectangle=INKSCAPE_SVG.getElementById(
-                        selection_items.get_value(selection.iter, 2)),
+                        selection_items.get_value(selection.iter,
+                                                  Column.RECT_NAME)),
                     name=chip_item.name,
                     description=chip_item.description,
                     image_path=chip_item.image_path,
                     gdkpixbuf=chip_item.image,
                     color=colors.next(),
-                    reverse=selection_items.get_value(selection.iter, 4))
+                    reverse=selection_items.get_value(selection.iter,
+                                                      Column.ON_REVERSE))
 
             chip_index += 1
 
-        if Annotation is None:
-            raise TypeError("Failed to create Annotation for"
-                            f"{selection_items.get_value(selection.iter, 2)}")
-        assert annotation is not None
+        if annotation is None:
+            raise AssertionError(
+                "Failed to create Annotation for "
+                f"""{selection_items.get_value(selection.iter,
+                                               Column.RECT_NAME)}""")
         # TODO still not happy with this method
         # Some ideas
         # - config option to select a distribution method
@@ -999,41 +1111,52 @@ def closest_gutter(annotation: Annotation, gutter_a: Gutter,
 
 
 def chip_context_image(rect: inkex.Rectangle,
-                       selections: Gtk.ListStore) -> GdkPixbuf.Pixbuf:
+                       svg: inkex.SvgDocumentElement) -> GdkPixbuf.Pixbuf:
     """Create an image of the context around a user-drawn rectangle"""
-    # TODO this is a bit expensive (rendering the whole svg)
-    # currently doing so to scale things
-    # but we could just pick some fraction of the svg size (same size contexts)
-    # or multiple of the rectangle size (results in different size contexts)
-    image = svg_without_selections_as_pixbuf(INKSCAPE_SVG, selections, rect)
-    render_width = image.get_width()
-    render_height = image.get_height()
-    svg_width = INKSCAPE_SVG.viewbox_width
-    svg_height = INKSCAPE_SVG.viewbox_height
-    # average, because I'm not getting consistent scale factors
-    # TODO sort out what the render makes vs what inkscape says
-    scale_factor = (render_width/svg_width + render_height/svg_height)/2
+    # make our chip rect visible
+    new_rect = svg.getElementById(rect.get("id"))
+    new_rect.style['stroke'] = 'red'
 
-    # Rectangle dimensions
-    size = 360
-    rect_bb = rect.bounding_box()
-    context_x = max(0, rect_bb.center_x * scale_factor - ((size)/2))
-    context_y = max(0, rect_bb.center_y * scale_factor - ((size)/2))
+    context_center_x = new_rect.bounding_box().center_x
+    context_center_y = new_rect.bounding_box().center_y
+    size = 0.4 * min(svg.viewbox_height, svg.viewbox_width)
+    new_x = min(svg.viewbox_width, max(0, context_center_x - (0.5 * size)))
+    new_y = min(svg.viewbox_height, max(0, context_center_y - (0.5 * size)))
 
-    # Don't go past the render boundary
-    context_width = size
-    if (context_x + size) > render_width:
-        context_x = render_width - size
+    # save svg state (using get so we can restore from actual string values)
+    original_viewbox = svg.get("viewBox")
+    original_width = svg.get("width")
+    original_height = svg.get("height")
 
-    context_height = size
-    if (context_y + size) > render_height:
-        context_y = render_height - size
+    # modify viewbox to fit our context
+    svg.set("viewBox", f"{new_x:f} {new_y:f} {size:f} {size:f}")
+    # set viewport to preferred output size
+    svg.set("width", 360)
+    svg.set("height", 360)
+    stream = Gio.MemoryInputStream.new_from_bytes(
+        GLib.Bytes.new(svg.tostring()))
+    render = GdkPixbuf.Pixbuf.new_from_stream(stream, None)
+
+    # restore svg state
+    new_rect.style['stroke'] = 'none'
+
+    if original_viewbox is None:
+        svg.pop("viewBox")
+    else:
+        svg.set("viewBox", original_viewbox)
+    if original_width is None:
+        svg.pop("width")
+    else:
+        svg.set("width", original_width)
+    if original_height is None:
+        svg.pop("height")
+    else:
+        svg.set("height", original_height)
 
     # NOTE: images may include the inkscape page area which may be transparent
     #       Gtk will render it transparent.
     #       It looks odd, but provides context that we're beyond the image edge
-    return image.new_subpixbuf(
-        context_x, context_y, context_width, context_height)
+    return render
 
 
 def rect_icon_image(rect: inkex.Rectangle,

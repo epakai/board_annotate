@@ -37,18 +37,20 @@
   </object>
   <object class="GtkListStore" id="selection_items">
     <columns>
-      <!-- column-name board_context -->
+      <!-- column-name CONTEXT_IMG -->
       <column type="GdkPixbuf"/>
-      <!-- column-name rectangle_icon -->
+      <!-- column-name RECT_ICON -->
       <column type="GdkPixbuf"/>
-      <!-- column-name rectangle_name -->
+      <!-- column-name DISPLAY_ICON -->
+      <column type="GdkPixbuf"/>
+      <!-- column-name RECT_NAME -->
       <column type="gchararray"/>
-      <!-- column-name chip_select -->
+      <!-- column-name CHIP_SELECT -->
       <column type="gchararray"/>
-      <!-- column-name on_reverse -->
+      <!-- column-name DISPLAY_NAME -->
+      <column type="gchararray"/>
+      <!-- column-name ON_REVERSE -->
       <column type="gboolean"/>
-      <!-- column-name rectangle_icon_display -->
-      <column type="GdkPixbuf"/>
     </columns>
   </object>
   <object class="GtkDialog" id="board_annotate">
@@ -200,23 +202,54 @@
                   </packing>
                 </child>
                 <child>
-                  <object class="GtkCheckButton" id="chip_reverse">
-                    <property name="label" translatable="yes">On reverse</property>
+                  <object class="GtkButtonBox">
                     <property name="visible">True</property>
-                    <property name="can-focus">True</property>
-                    <property name="receives-default">False</property>
-                    <property name="tooltip-text" translatable="yes">Displays the chip outline dashed to indicate the chip is on the back of the board.</property>
-                    <property name="margin-start">3</property>
-                    <property name="margin-end">3</property>
-                    <property name="margin-top">3</property>
-                    <property name="margin-bottom">3</property>
-                    <property name="draw-indicator">True</property>
+                    <property name="can-focus">False</property>
+                    <property name="layout-style">start</property>
+                    <child>
+                      <object class="GtkCheckButton" id="chip_reverse">
+                        <property name="label" translatable="yes">On reverse</property>
+                        <property name="visible">True</property>
+                        <property name="can-focus">True</property>
+                        <property name="receives-default">False</property>
+                        <property name="tooltip-text" translatable="yes">Displays the chip outline dashed to indicate the chip is on the back of the board.</property>
+                        <property name="margin-start">3</property>
+                        <property name="margin-end">3</property>
+                        <property name="margin-top">3</property>
+                        <property name="margin-bottom">3</property>
+                        <property name="draw-indicator">True</property>
+                      </object>
+                      <packing>
+                        <property name="expand">False</property>
+                        <property name="fill">False</property>
+                        <property name="pack-type">end</property>
+                        <property name="position">0</property>
+                      </packing>
+                    </child>
+                    <child>
+                      <object class="GtkButton" id="unselect_chip">
+                        <property name="label" translatable="yes">Unselect Chip</property>
+                        <property name="visible">True</property>
+                        <property name="can-focus">True</property>
+                        <property name="receives-default">True</property>
+                        <property name="margin-start">3</property>
+                        <property name="margin-end">3</property>
+                        <property name="margin-top">3</property>
+                        <property name="margin-bottom">3</property>
+                      </object>
+                      <packing>
+                        <property name="expand">False</property>
+                        <property name="fill">True</property>
+                        <property name="pack-type">end</property>
+                        <property name="position">1</property>
+                        <property name="secondary">True</property>
+                      </packing>
+                    </child>
                   </object>
                   <packing>
                     <property name="expand">False</property>
-                    <property name="fill">False</property>
-                    <property name="pack-type">end</property>
-                    <property name="position">2</property>
+                    <property name="fill">True</property>
+                    <property name="position">1</property>
                   </packing>
                 </child>
               </object>

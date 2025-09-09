@@ -60,7 +60,6 @@ For empty fields, use "". =chip_photo= and =description= can be empty
     + look at the large context image
     + pick a chip from the list on the right
 - hit apply once all chips have been matched
-- close the error window (ignore the frozen importlib warnings)
 - images will be embedded, and annotations drawn
 
 See [[file:usage.org][usage]]
@@ -118,7 +117,10 @@ colors:
 ** GUI stuff
 - New GUI issues
     + Buttons don't animate
-    + add an unselect button?
+        * seems to apply to Extension manager as well
+        * probably something off with their event loop, beyond me
+    + Sometimes the selection goes to the next chip when operating quickly
+        + maybe can simultaneously trigger update match and change selection 
 
 ** Testing and edge cases
 - test with bad file paths
@@ -130,6 +132,9 @@ colors:
     + overlapping the gutter?
     + outside the page?
     + straddling the page border?
+- Orientation mismatch between image and config
+    + everything ends up tiny and jammed into corner
+    + could probably do a check for odd gutter sizes
 - Lots of missing input verification when accessing the yaml config
 - Newer inkscapes
 - Windows, Mac
@@ -170,11 +175,14 @@ colors:
 - maybe allow groups in the selection but filter them for processing
     + does selecting a group automatically include its children?
 - non-embedded photos
+- ability to pull zoomed chip images from the main image
+    + I used a separate microscope for my chip images
+    + Some board photos are good enough quality to serve both purposes
 
 * Other considerations
 - genericize the names, this can probably be used for non-circuit board things
-    + Board annotate ->
-    + board_photo -> 
-    + chip_photo -> 
-    + chip
+    + Board annotate -> image_annotate
+    + board_photo -> main_photo
+    + chip_photo -> sub_photo
+    + chip 
     + board
